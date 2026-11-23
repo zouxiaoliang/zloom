@@ -235,7 +235,13 @@ zloom-clone() {
 
     if [[ ! -d "${dir}" ]]; then
         mkdir -p "${dir}"
-        git clone --depth=1 --recursive -b "${branch}" "${url}" "${dir}"
+        if [[ "${branch}" == HEAD ]]; then
+            # @HEAD pin (offline default-branch fallback): clone the
+            # remote's default branch, whatever it is.
+            git clone --depth=1 --recursive "${url}" "${dir}"
+        else
+            git clone --depth=1 --recursive -b "${branch}" "${url}" "${dir}"
+        fi
     fi
 }
 
@@ -405,23 +411,17 @@ zloom-reset() {
     fi
 }
 
-zloom-update() {
+# Pull every clone concurrently (fisher-style). Branch checkouts update
+# via `git pull'; detached pins (@tag, @HEAD) via fetch + checkout so a
+# moved tag or a new default-branch tip is followed; commit-sha pins pin
+# exact content and are skipped. Failures surface after all jobs finish;
+# the exit status reflects them. Nothing here runs at shell startup.
+-zloom-pull-all() {
     setopt localoptions extended_glob
 
-    # Refresh cached remote snippets via their recorded origin URLs.
-    local url_file snippet_url
-    for url_file in "${ZLOOM_DIR}"/snippets/*.url(N); do
-        snippet_url="$(<${url_file})"
-        -zlpute "Updating snippet '${snippet_url}' ..."
-        -zloom-fetch-snippet "${snippet_url}" 1
-    done
+    local repo pid ref dir line rc=0
+    local -a words jobs=()
 
-    # Pull every clone concurrently (fisher-style). Detached-HEAD clones
-    # (@tag / @commit pins) cannot pull and are skipped. (N): with only
-    # snippets / local-path plugins in the manifest there may be nothing
-    # to pull; the reset below must still happen.
-    local repo pid rc=0
-    local -a jobs=()
     for repo in "${ZLOOM_DIR}"/(^(.git|snippets))/*(N); do
         -zlpute "Updating '${repo}' ..."
         ( cd "${repo}" \
@@ -430,10 +430,56 @@ zloom-update() {
             && git submodule update --init --recursive --quiet ) &
         jobs+=($!)
     done
+
+    if [[ -f "${ZLOOM_PLUGINS}" ]]; then
+        while IFS= read -r line; do
+            -zloom-manifest-words "${line}"
+            words=("${reply[@]}")
+            (( ${#words} >= 2 )) || continue
+            [[ "${words[1]}" == (load|defer) ]] || continue
+            -zloom-split-ref "${words[2]}"
+            ref="${REPLY_REF}"
+            [[ -n "${ref}" ]] || continue
+            [[ "${ref}" =~ '^[0-9a-f]{7,40}$' ]] && continue
+            -zloom-set-clone-dir "${REPLY}" "${ref}"
+            dir="${REPLY}"
+            [[ -d "${dir}" ]] || continue
+            # Attached branches are covered by the pull loop above.
+            git -C "${dir}" symbolic-ref -q HEAD >/dev/null 2>&1 && continue
+            -zlpute "Updating '${dir:t}' (${ref}) ..."
+            if [[ "${ref}" == HEAD ]]; then
+                ( cd "${dir}" \
+                    && git fetch --quiet origin \
+                    && git checkout --quiet FETCH_HEAD ) &
+            else
+                ( cd "${dir}" \
+                    && git fetch --quiet origin \
+                    && { git fetch --quiet origin "tag ${ref}" 2>/dev/null || :; } \
+                    && git checkout --quiet "${ref}" \
+                    && git submodule update --init --recursive --quiet ) &
+            fi
+            jobs+=($!)
+        done < "${ZLOOM_PLUGINS}"
+    fi
+
     for pid in "${jobs[@]}"; do
         wait "${pid}" || rc=1
     done
-    (( rc )) && -zlpute "update: one or more repositories failed to pull"
+    return ${rc}
+}
+
+zloom-update() {
+    # Refresh cached remote snippets via their recorded origin URLs.
+    local url_file snippet_url
+    for url_file in "${ZLOOM_DIR}"/snippets/*.url(N); do
+        snippet_url="$(<${url_file})"
+        -zlpute "Updating snippet '${snippet_url}' ..."
+        -zloom-fetch-snippet "${snippet_url}" 1
+    done
+
+    -zloom-pull-all
+    local rc=$?
+    (( rc )) && -zlpute "update: one or more repositories failed to update"
     zloom-reset
     -zloom-hook update
     return ${rc}
@@ -1329,12 +1375,31 @@ zloom-defer() {
 # recorded, because the plugins may already be active in this session.
 -zloom-rebuild() {
     if [[ "${1}" == live ]]; then
+        local _zloom_cf _zloom_ff _zloom_th
+        local _zloom_cfg="${ZLOOM_PLUGINS:h}"
+
+        # The bootstrap shell never sources the freshly generated
+        # init.zsh, so mirror its order here to make the first shell
+        # fully functional: conf.d + config.zsh ahead of the plugins
+        # (PATH ready), function files and themes after them.
+        for _zloom_cf in "${_zloom_cfg}"/conf.d/*.zsh(N); do
+            source "${_zloom_cf}"
+        done
+        [[ -f "${_zloom_cfg}/config.zsh" ]] && source "${_zloom_cfg}/config.zsh"
+
         -zloom-replay-manifest
         zloom-save
-        # The shell bootstrapping from the manifest never sources the
-        # freshly generated init.zsh, so its trailing -zloom-turbo-install
-        # line would go unexecuted and deferred plugins were silently
-        # skipped in this first shell; arm the hook here instead (it
+
+        for _zloom_ff in "${_zloom_cfg}"/functions/*.zsh(N); do
+            [[ -s "${_zloom_ff}.zwc" && "${_zloom_ff}" -nt "${_zloom_ff}.zwc" ]] \
+                || zcompile -U -- "${_zloom_ff}" 2>/dev/null
+            source "${_zloom_ff}"
+        done
+        for _zloom_th in "${_zloom_cfg}"/themes/*.zsh(N); do
+            source "${_zloom_th}"
+        done
+
+        # ... and the turbo hook last, exactly like the init script (it
         # loads synchronously in non-interactive shells).
         -zloom-turbo-install
         return
@@ -1450,6 +1515,11 @@ zloom-add() {
             if [[ -n "${REPLY}" && "${REPLY}" != master ]]; then
                 args[1]="${args[1]}@${REPLY}"
                 -zlpute "add: ${_repo} defaults to branch ${REPLY}; pinning it"
+            elif [[ -z "${REPLY}" ]]; then
+                # Remote unreachable: pin @HEAD so the clone follows the
+                # remote's default branch instead of assuming master.
+                args[1]="${args[1]}@HEAD"
+                -zlpute "add: cannot reach ${_repo}; pinning @HEAD (default branch)"
             fi
         fi
     fi
@@ -1702,14 +1772,22 @@ zloom-del() {
 # --clean). Hand edits to the manifest thus take effect with one
 # command, no `zloom reset' plus a new shell needed.
 zloom-sync() {
-    local clean=""
-    if [[ "${1}" == "--clean" || "${1}" == "-c" ]]; then
-        clean=1
+    local clean="" update=""
+    while [[ "${1}" == -* ]]; do
+        case "${1}" in
+            --clean|-c)  clean=1 ;;
+            --update|-u) update=1 ;;
+            *)
+                -zlpute '`sync` takes no positional parameters:'
+                -zlpute '`zloom sync [--clean] [--update]`'
+                return 1
+                ;;
+        esac
         shift
-    fi
+    done
     if (( $# > 0 )); then
-        -zlpute '`sync` takes no parameters:'
-        -zlpute '`zloom sync [--clean]`'
+        -zlpute '`sync` takes no positional parameters:'
+        -zlpute '`zloom sync [--clean] [--update]`'
         return 1
     fi
     if [[ ! -f "${ZLOOM_PLUGINS}" ]]; then
@@ -1742,6 +1820,13 @@ zloom-sync() {
         jobs+=($!)
     done < "${ZLOOM_PLUGINS}"
     (( ${#jobs} )) && wait "${jobs[@]}"
+
+    # --update also pulls existing clones (fisher's update = reconcile
+    # + fetch in one command).
+    if [[ -n "${update}" ]]; then
+        -zloom-pull-all \
+            || -zlpute "sync: one or more repositories failed to update"
+    fi
 
     -zloom-rebuild
 
