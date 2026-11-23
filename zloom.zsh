@@ -1863,10 +1863,10 @@ zloom-clean() {
         return 1
     fi
 
-    # Clone directories the manifest still references (load/defer entries;
-    # single-argument /path or ./path entries load in place and have no
-    # clone).
-    local -a used=()
+    # Clone directories and remote-snippet URLs the manifest still
+    # references (single-argument /path or ./path entries load in place
+    # and have no clone).
+    local -a used=() used_snippets=()
     local line repo branch
     local -a words
     while IFS= read -r line; do
@@ -1885,6 +1885,10 @@ zloom-clean() {
                     -zloom-set-clone-dir "${repo}" "${branch}"
                     used+=("${REPLY}")
                 fi
+                ;;
+            snippet)
+                [[ "${words[2]}" == (http|https)://* ]] \
+                    && used_snippets+=("${words[2]}")
                 ;;
         esac
     done < "${ZLOOM_PLUGINS}"
@@ -1906,14 +1910,29 @@ zloom-clean() {
         [[ " ${used[@]} " == *" ${sub} "* ]] || unused+=("${sub}")
     done
 
-    if (( ! ${#unused} )); then
-        -zlpute "clean: every cloned plugin is listed in ${ZLOOM_PLUGINS}"
+    # Stale remote-snippet caches: cached files whose recorded origin URL
+    # is no longer listed as a snippet entry.
+    local -a unused_snippets=()
+    local cache url_file url
+    for cache in "${ZLOOM_DIR}"/snippets/*(N.); do
+        [[ "${cache:e}" == (url|zwc) ]] && continue
+        url_file="${cache}.url"
+        [[ -f "${url_file}" ]] || continue
+        url="$(<${url_file})"
+        [[ " ${used_snippets[*]} " == *" ${url} "* ]] || unused_snippets+=("${cache}")
+    done
+
+    if (( ! ${#unused} && ! ${#unused_snippets} )); then
+        -zlpute "clean: every clone and snippet cache is listed in ${ZLOOM_PLUGINS}"
         return 0
     fi
 
-    -zlpute "cloned plugins not in ${ZLOOM_PLUGINS}:"
+    -zlpute "not referenced by ${ZLOOM_PLUGINS}:"
     for sub in "${unused[@]}"; do
         -zlputs "  ${sub}"
+    done
+    for cache in "${unused_snippets[@]}"; do
+        -zlputs "  ${cache}"
     done
 
     if [[ -z "${force}" ]]; then
@@ -1931,6 +1950,14 @@ zloom-clean() {
         rm -rf "${sub}"
         rmdir "${sub:h}" 2>/dev/null
     done
+    for cache in "${unused_snippets[@]}"; do
+        if [[ "${cache}" != "${ZLOOM_DIR}"/* ]]; then
+            -zlpute "clean: skipping suspicious path ${cache}"
+            continue
+        fi
+        -zlpute "Removing ${cache} ..."
+        rm -f "${cache}" "${cache}.url" "${cache}.zwc"
+    done
 
     # A stale init.zsh (e.g. generated before the manifest existed) may
     # still source what we just deleted; reset it so the next shell
@@ -1947,12 +1974,73 @@ zloom-clean() {
     fi
 }
 
+# `zloom list --outdated': compare every clone's HEAD with the remote ref
+# it is pinned to — branches via refs/heads, pins via refs/tags, @HEAD via
+# HEAD; commit-sha pins are reported as pinned. Requires network; nothing
+# is pulled.
+-zloom-list-outdated() {
+    [[ -f "${ZLOOM_PLUGINS}" ]] || { -zlpute "outdated: manifest not found"; return 1; }
+    local line repo branch ref dir url lsha rsha seen=0
+    local -a words
+    while IFS= read -r line; do
+        -zloom-manifest-words "${line}"
+        words=("${reply[@]}")
+        (( ${#words} >= 2 )) || continue
+        [[ "${words[1]}" == (load|defer) ]] || continue
+        repo="${words[2]}"
+        branch="${words[4]:-master}"
+        -zloom-split-ref "${repo}"
+        repo="${REPLY}"
+        ref="${REPLY_REF}"
+        [[ -n "${ref}" ]] && branch="${ref}"
+        [[ "${repo}" == /* || "${repo}" == .* ]] && continue
+        (( seen++ ))
+        -zloom-set-clone-dir "${repo}" "${branch}"
+        dir="${REPLY}"
+        if [[ ! -d "${dir}" ]]; then
+            printf '%-9s%s\n' missing "${words[2]} (run zloom sync)"
+            continue
+        fi
+        if [[ "${branch}" =~ '^[0-9a-f]{7,40}$' ]]; then
+            printf '%-9s%s\n' pinned "${words[2]} (commit ${branch})"
+            continue
+        fi
+        lsha="$(git -C "${dir}" rev-parse HEAD 2>/dev/null)"
+        url="$(-zloom-get-clone-url "${repo}")"
+        if [[ "${branch}" == HEAD ]]; then
+            rsha="$(git ls-remote "${url}" HEAD 2>/dev/null)"
+        else
+            rsha="$(git ls-remote "${url}" "refs/heads/${branch}" 2>/dev/null)"
+            [[ -n "${rsha}" ]] || rsha="$(git ls-remote "${url}" "refs/tags/${branch}" 2>/dev/null)"
+        fi
+        rsha="${rsha%%$'\t'*}"
+        if [[ -z "${rsha}" ]]; then
+            printf '%-9s%s\n' '?ref' "${words[2]} (${branch} not found upstream)"
+        elif [[ "${lsha}" != "${rsha}" ]]; then
+            printf '%-9s%s\n' outdated "${words[2]}  ${lsha:0:7} -> ${rsha:0:7}"
+        else
+            printf '%-9s%s\n' ok "${words[2]}"
+        fi
+    done < "${ZLOOM_PLUGINS}"
+    (( seen )) || -zlpute "outdated: no load/defer entries"
+    return 0
+}
+
 # `zloom list': show the manifest entries with their kind — `load'
 # (synchronous), `defer' (turbo, after the first prompt), `snippet'
 # (single file), `env', `eval', `alias' and `func' — in load order.
 # Legacy setups without a manifest keep the old behaviour: dump the
 # generated init script.
 zloom-list() {
+    if [[ "${1}" == "--outdated" || "${1}" == "-o" ]]; then
+        shift
+        if (( $# > 0 )); then
+            -zlpute '`list --outdated` takes no parameters'
+            return 1
+        fi
+        -zloom-list-outdated
+        return $?
+    fi
     if [[ ! -f "${ZLOOM_PLUGINS}" ]]; then
         if [[ -f "${ZLOOM_INIT}" ]]; then
             cat "${ZLOOM_INIT}"
@@ -2023,15 +2111,143 @@ zloom-saved() {
     [[ -f "${ZLOOM_INIT}" ]] && return 0 || return 1
 }
 
-zloom-selfupdate() {
-    if [[ -e "${ZLOOM_SOURCE}/.git" ]]; then
-        (cd "${ZLOOM_SOURCE}" \
-            && git pull) \
-            && zloom reset
+-zloom-dr-ok()   { printf '  [ok]     %s\n' "$*" ;}
+-zloom-dr-warn() { printf '  [warn]   %s\n' "$*" ;}
+
+# `zloom doctor': sanity-check the setup — program, manifest, generated
+# init script, clones, drop-in directories, completion caches — and time
+# one interactive shell start as a regression probe for the fast static
+# path. Returns 1 when anything warned.
+zloom-doctor() {
+    if (( $# > 0 )); then
+        -zlpute '`doctor` takes no parameters'
+        return 1
+    fi
+    integer warns=0
+
+    -zlputs "program:  ${ZLOOM_SOURCE}"
+    if git -C "${ZLOOM_SOURCE}" rev-parse HEAD >/dev/null 2>&1; then
+        -zloom-dr-ok "git @ $(git -C "${ZLOOM_SOURCE}" describe --always --dirty 2>/dev/null || git -C "${ZLOOM_SOURCE}" rev-parse --short HEAD)"
     else
+        -zloom-dr-warn "not a git repository (selfupdate unavailable)"
+        (( warns++ ))
+    fi
+
+    if [[ -f "${ZLOOM_PLUGINS}" ]]; then
+        -zloom-dr-ok "manifest: ${ZLOOM_PLUGINS}"
+    else
+        -zloom-dr-warn "manifest missing: ${ZLOOM_PLUGINS}"
+        (( warns++ ))
+    fi
+
+    if [[ -f "${ZLOOM_INIT}" ]]; then
+        if [[ "${ZLOOM_PLUGINS}" -nt "${ZLOOM_INIT}" ]]; then
+            -zloom-dr-warn "manifest is newer than init.zsh -- run \`zloom sync'"
+            (( warns++ ))
+        else
+            -zloom-dr-ok "init.zsh present and up to date"
+        fi
+    else
+        -zloom-dr-warn "init.zsh missing (rebuilt on the next start)"
+        (( warns++ ))
+    fi
+
+    integer missing=0
+    local line repo branch
+    local -a words
+    if [[ -f "${ZLOOM_PLUGINS}" ]]; then
+        while IFS= read -r line; do
+            -zloom-manifest-words "${line}"
+            words=("${reply[@]}")
+            (( ${#words} >= 2 )) || continue
+            [[ "${words[1]}" == (load|defer) ]] || continue
+            repo="${words[2]}"
+            branch="${words[4]:-master}"
+            -zloom-split-ref "${repo}"
+            [[ -n "${REPLY_REF}" ]] && branch="${REPLY_REF}"
+            [[ "${REPLY}" == /* || "${REPLY}" == .* ]] && continue
+            -zloom-set-clone-dir "${REPLY}" "${branch}"
+            [[ -d "${REPLY}" ]] || (( missing++ ))
+        done < "${ZLOOM_PLUGINS}"
+    fi
+    if (( missing )); then
+        -zloom-dr-warn "${missing} manifest clone(s) missing -- run \`zloom sync'"
+        (( warns++ ))
+    else
+        -zloom-dr-ok "all manifest clones present"
+    fi
+
+    local d
+    for d in conf.d functions completions themes; do
+        [[ -d "${ZLOOM_PLUGINS:h}/${d}" ]] && -zloom-dr-ok "drop-in dir: ${d}/"
+    done
+    [[ -f "${ZLOOM_PLUGINS:h}/config.zsh" ]] && -zloom-dr-ok "config.zsh present"
+
+    local -a _zloom_cpl=(${ZLOOM_PLUGINS:h}/completions/*(N))
+    if (( ${#_zloom_cpl} )); then
+        if [[ -f "${ZLOOM_INIT:h}/completions.stamp" ]]; then
+            -zloom-dr-ok "completions/ (${#_zloom_cpl} files) + stamp"
+        else
+            -zloom-dr-warn "completions/ has files but no stamp (full compinit pending)"
+            (( warns++ ))
+        fi
+    fi
+
+    if zmodload zsh/datetime 2>/dev/null; then
+        local t0=${EPOCHREALTIME}
+        zsh -ic 'exit' >/dev/null 2>&1
+        printf '  [info]   interactive shell starts in %4.0f ms\n' $(( (EPOCHREALTIME - t0) * 1000 ))
+    fi
+
+    (( warns )) && { -zlpute "doctor: ${warns} warning(s)"; return 1; }
+    -zlpute "doctor: all checks passed"
+    return 0
+}
+
+# `zloom version': where zloom runs from and which git revision it is.
+zloom-version() {
+    -zlputs "zloom ${ZLOOM_SOURCE}"
+    local v="$(git -C "${ZLOOM_SOURCE}" describe --always --dirty 2>/dev/null)"
+    [[ -n "${v}" ]] && -zlputs "version ${v}" || -zlputs "version unknown (not a git repository)"
+}
+
+zloom-selfupdate() {
+    local rollback=""
+    if [[ "${1}" == "--rollback" || "${1}" == "-r" ]]; then
+        rollback=1
+        shift
+    fi
+    if (( $# > 0 )); then
+        -zlpute '`selfupdate` takes no parameters:'
+        -zlpute '`zloom selfupdate [--rollback]`'
+        return 1
+    fi
+
+    if [[ ! -e "${ZLOOM_SOURCE}/.git" ]]; then
         -zlpute "Not running from a git repository; cannot automatically update."
         return 1
     fi
+
+    local prev="${ZLOOM_DIR}/selfupdate.prev"
+    if [[ -n "${rollback}" ]]; then
+        if [[ ! -f "${prev}" ]]; then
+            -zlpute "selfupdate: no previous version recorded (${prev})"
+            return 1
+        fi
+        local old="$(<${prev})"
+        ( cd "${ZLOOM_SOURCE}" && git reset --hard -q "${old}" ) \
+            && rm -f "${prev}" \
+            && zloom reset \
+            && -zlpute "selfupdate: rolled back to ${old}"
+        return $?
+    fi
+
+    local cur="$(git -C "${ZLOOM_SOURCE}" rev-parse HEAD 2>/dev/null)"
+    ( cd "${ZLOOM_SOURCE}" && git pull --quiet ) || return 1
+    [[ -n "${cur}" ]] && -zlputs "${cur}" >! "${prev}"
+    local new="$(git -C "${ZLOOM_SOURCE}" rev-parse HEAD 2>/dev/null)"
+    zloom reset
+    -zlpute "selfupdate: ${cur:-?} -> ${new:-?} (rollback with \`zloom selfupdate --rollback)"
 }
 
 zloom-oh-my-zsh() {
@@ -2091,7 +2307,7 @@ zloom() {
         -zlputs 'usage: `zloom [command | instruction] [options]`'
         -zlputs "    plugin management: add, del, snippet, clean"
         -zlputs '    settings: env, alias, func, eval'
-        -zlputs "    commands: list, saved, reset, sync, clone, update, selfupdate"
+        -zlputs "    commands: list, saved, reset, sync, clone, update, selfupdate, doctor, version"
         -zlputs "    instructions: load, defer, oh-my-zsh, pmodule, prezto, save, apply"
         return 1
     fi

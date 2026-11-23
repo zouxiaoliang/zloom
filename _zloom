@@ -13,32 +13,86 @@
 #
 # ------------------------------------------------------------------------------
 
-local -a _zloom_commands
-_zloom_commands=(
-    "add:add a plugin to the manifest and load it"
-    "alias:define a persistent alias managed by the manifest"
-    "apply:add manifest fpath entries and run compinit"
-    "clean:list or delete clones no longer in the manifest"
-    "clone:clone plugin from repository"
-    "defer:defer plugin loading until after the first prompt"
-    "del:remove a plugin, snippet, env key, alias or function from the manifest"
-    "env:export a persistent environment variable managed by the manifest"
-    "eval:evaluate shell code printed by a command (e.g. brew shellenv)"
-    "func:define a persistent function managed by the manifest"
-    "list:list manifest plugins with their load method"
-    "load:clone and load plugin"
-    "loadall:bulk load plugins from stdin"
-    "oh-my-zsh:load oh-my-zsh base"
-    "pmodule:load a repository as a prezto module"
-    "prezto:load prezto base"
-    "reset:delete the init.zsh script"
-    "save:generate the init.zsh script"
-    "saved:return 0 if an init script exists"
-    "selfupdate:update zloom from its repository"
-    "snippet:load a local or remote configuration file"
-    "sync:reconcile clones and init.zsh with the manifest"
-    "update:update all repositories and remove the init script"
-)
+_zloom() {
+    local -a _zloom_commands
+    _zloom_commands=(
+        "add:add a plugin to the manifest and load it"
+        "alias:define a persistent alias managed by the manifest"
+        "apply:add manifest fpath entries and run compinit"
+        "clean:list or delete clones no longer in the manifest"
+        "clone:clone plugin from repository"
+        "defer:defer plugin loading until after the first prompt"
+        "del:remove a plugin, snippet, env key, alias or function from the manifest"
+        "doctor:sanity-check the zloom setup and time a shell start"
+        "env:export a persistent environment variable managed by the manifest"
+        "eval:evaluate shell code printed by a command (e.g. brew shellenv)"
+        "func:define a persistent function managed by the manifest"
+        "list:list manifest plugins with their load method"
+        "load:clone and load plugin"
+        "loadall:bulk load plugins from stdin"
+        "oh-my-zsh:load oh-my-zsh base"
+        "pmodule:load a repository as a prezto module"
+        "prezto:load prezto base"
+        "reset:delete the init.zsh script"
+        "save:generate the init.zsh script"
+        "saved:return 0 if an init script exists"
+        "selfupdate:update zloom from its repository"
+        "snippet:load a local or remote configuration file"
+        "sync:reconcile clones and init.zsh with the manifest"
+        "update:update all repositories and remove the init script"
+        "version:show where zloom runs from and its git revision"
+    )
 
-_describe -t commands "zloom subcommand" _zloom_commands
-return 0
+    _arguments -C '1:command:->cmds' '*::arg:->args'
+
+    case $state in
+        cmds)
+            _describe -t commands "zloom subcommand" _zloom_commands
+            ;;
+        args)
+            # Arguments that complete from the manifest: entry keys as
+            # accepted by `zloom del'.
+            local m="${ZLOOM_PLUGINS:-${XDG_CONFIG_HOME:-$HOME/.config}/zloom/plugins.zsh}"
+            [[ -f $m ]] || m="$HOME/.zloom/plugins.zsh"
+            local -a entries
+            local line
+            if [[ -f $m ]]; then
+                while IFS= read -r line; do
+                    [[ "$line" =~ '^[[:space:]]*($|#)' ]] && continue
+                    local -a w
+                    w=(${(Q)${(z)line}}) 2>/dev/null
+                    (( $#w >= 2 )) || continue
+                    case $w[1] in
+                        load|defer|snippet|env|alias|func|eval)
+                            entries+=("${${w[2]}%%=*}")
+                            ;;
+                    esac
+                done < $m
+            fi
+            case $words[1] in
+                del)
+                    (( $#entries )) && _describe -t entries "manifest entry" entries
+                    ;;
+                sync)
+                    _values -w flag '--clean[delete unreferenced clones]' \
+                        '--update[also pull existing clones]'
+                    ;;
+                clean)
+                    _values -w flag '--force[delete unreferenced clones]'
+                    ;;
+                list)
+                    _values -w flag '--outdated[compare clones with their remote refs]'
+                    ;;
+                selfupdate)
+                    _values -w flag '--rollback[restore the previous revision]'
+                    ;;
+                reset|apply|saved|update|doctor|version|loadall|oh-my-zsh)
+                    ;;
+                add|load|defer|clone|pmodule)
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_zloom "$@"
