@@ -7,6 +7,24 @@ local ZLOOM_SOURCE="$0:A:h"
 
 -zlinit() { -zlputs "$*" >> "${ZLOOM_INIT}" ;}
 
+# Invoke a lifecycle hook when the user defined one: `_zloom_post_add',
+# `_zloom_post_del', `_zloom_post_sync' and `_zloom_post_update' run (with
+# the command's argument) after the respective command finished. zsh has
+# no event system, so zloom calls convention-named functions instead of
+# fisher's fisher_* events; functions/ is the natural place to define them
+# (the file is sourced on demand, so hooks also fire in a shell that has
+# not loaded the generated init script yet, e.g. right after bootstrap).
+-zloom-hook() {
+    local fn="_zloom_post_${1}"
+    shift
+    if (( ! $+functions[${fn}] )) \
+            && [[ -f "${ZLOOM_PLUGINS:A:h}/functions/${fn}.zsh" ]]; then
+        source "${ZLOOM_PLUGINS:A:h}/functions/${fn}.zsh"
+    fi
+    (( $+functions[${fn}] )) && "${fn}" "$@"
+    return 0
+}
+
 
 # Regenerable data (generated init script, plugin clones, snippet cache,
 # completions stamp) lives in the XDG data directory, away from the
@@ -398,15 +416,27 @@ zloom-update() {
         -zloom-fetch-snippet "${snippet_url}" 1
     done
 
-    # (N): with only snippets / local-path plugins in the manifest there
-    # may be nothing to pull; the reset below must still happen.
+    # Pull every clone concurrently (fisher-style). Detached-HEAD clones
+    # (@tag / @commit pins) cannot pull and are skipped. (N): with only
+    # snippets / local-path plugins in the manifest there may be nothing
+    # to pull; the reset below must still happen.
+    local repo pid rc=0
+    local -a jobs=()
     for repo in "${ZLOOM_DIR}"/(^(.git|snippets))/*(N); do
         -zlpute "Updating '${repo}' ..."
-        (cd "${repo}" \
-            && git pull \
-            && git submodule update --init --recursive)
+        ( cd "${repo}" \
+            && { git symbolic-ref -q HEAD >/dev/null || exit 0; } \
+            && git pull --quiet \
+            && git submodule update --init --recursive --quiet ) &
+        jobs+=($!)
     done
+    for pid in "${jobs[@]}"; do
+        wait "${pid}" || rc=1
+    done
+    (( rc )) && -zlpute "update: one or more repositories failed to pull"
     zloom-reset
+    -zloom-hook update
+    return ${rc}
 }
 
 # Called from the generated init.zsh with the recorded state of
@@ -1460,6 +1490,7 @@ zloom-add() {
         -zloom-turbo-install
     fi
     -zlpute "added ${plugin}; listed in ${ZLOOM_PLUGINS}"
+    -zloom-hook add "${plugin}"
 }
 
 # `zloom env KEY=VALUE' (or `zloom env KEY VALUE'): export KEY right away,
@@ -1661,6 +1692,7 @@ zloom-del() {
     (( unset_func )) && unfunction "${name}" 2>/dev/null
 
     -zlpute "removed ${name} (files stay on disk; init.zsh regenerated)"
+    -zloom-hook del "${name}"
 }
 
 # `zloom sync [--clean]': make the world match the manifest — fisher's
@@ -1719,6 +1751,7 @@ zloom-sync() {
     else
         zloom-clean
     fi
+    -zloom-hook sync
     return 0
 }
 

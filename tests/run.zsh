@@ -207,6 +207,36 @@ zsh -c "
 check "legacy ~/.zloom with init.zsh wins" "${T}/home/.zloom" "$(cat "${T}/out")"
 rm -rf "${T}"
 
+print "13. lifecycle hooks fire after their command"
+sandbox
+mkdir -p "${T}/xdg/zloom/functions"
+print -r -- 'env X=1' >! "${T}/xdg/zloom/plugins.zsh"
+print -r -- '_zloom_post_sync() { print -r -- fired >! "${ZLOOM_HOOK_MARKER}" }' >! "${T}/xdg/zloom/functions/_zloom_post_sync.zsh"
+zsh -c "
+    export ZLOOM_DIR='${T}/data' XDG_CONFIG_HOME='${T}/xdg' ZDOTDIR='${T}' HOME='${T}/home' ZLOOM_HOOK_MARKER='${T}/hook'
+    source '${REPO}/zloom.zsh'
+    zloom sync >/dev/null 2>&1
+"
+[[ -f "${T}/hook" ]] && ok "_zloom_post_sync ran" || no "_zloom_post_sync ran"
+zsh -c "
+    export ZLOOM_DIR='${T}/data' XDG_CONFIG_HOME='${T}/xdg' ZDOTDIR='${T}' HOME='${T}/home' ZLOOM_HOOK_MARKER='${T}/hook2'
+    source '${REPO}/zloom.zsh'
+    zloom add '${T}/plug' >/dev/null 2>&1
+" 2>/dev/null
+[[ -f "${T}/hook2" ]] || ok "undefined hooks are skipped silently" || no "undefined hooks are skipped silently"
+rm -rf "${T}"
+
+print "14. zloom update pulls, skips tag pins, resets init"
+sandbox
+gitfix "${T}/bare"
+print -r -- "load file://${T}/bare.git@master" >! "${T}/xdg/zloom/plugins.zsh"
+zl 'true' >/dev/null 2>&1
+[[ -f "${T}/data/init.zsh" ]] || { mkdir -p "${T}/xdg/zloom"; print 'env X=1' >! "${T}/xdg/zloom/plugins.zsh"; zl 'true' >/dev/null 2>&1; print -r -- "load file://${T}/bare.git@master" >! "${T}/xdg/zloom/plugins.zsh"; zl 'true' >/dev/null 2>&1; }
+zl 'zloom update >/dev/null 2>&1; echo rc=$?' | grep -q 'rc=0' && ok "update succeeds on a branch clone" || no "update succeeds on a branch clone"
+[[ -f "${T}/data/init.zsh" ]] && no "update resets init.zsh" || ok "update resets init.zsh"
+zl 'echo "tag=${PLUGIN_TAG:-?}"' | grep -q 'tag=ok' && ok "shell after update rebuilds and loads" || no "shell after update rebuilds and loads"
+rm -rf "${T}"
+
 print
 print "passed: ${passed}  failed: ${failed}"
 (( failed == 0 )) || exit 1

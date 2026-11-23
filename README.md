@@ -261,6 +261,18 @@ clones every `load`/`defer` repository that is missing on disk
 clones that are no longer referenced (with `--clean` it deletes them, like
 `zloom clean --force`). No `zloom reset` plus a new shell needed.
 
+#### Lifecycle hooks
+
+    _zloom_post_add <plugin>
+    _zloom_post_del <name>
+    _zloom_post_sync
+    _zloom_post_update
+
+Functions with these names are invoked (with the command's argument) after
+`zloom add` / `del` / `sync` / `update` finish, when defined — zsh has no
+event system, so zloom calls convention-named functions instead of fisher's
+`fisher_*` events. `functions/` is the natural place to define them.
+
 #### Set a persistent environment variable
 
     zloom env KEY=VALUE
@@ -400,7 +412,8 @@ Returns 0 if an init script exists.
 #### Update all plugins and reset
     zloom update
 
-Pulls updates on every plugin repository and removes the init script.
+Pulls updates on every plugin repository (concurrently; detached-HEAD
+clones from `@tag`/`@commit` pins are skipped) and removes the init script.
 
 #### Update zloom
     zloom selfupdate
