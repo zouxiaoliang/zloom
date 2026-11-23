@@ -4,3 +4,5 @@
 !README.md
 !_zloom
 !zloom.zsh
+!tests/
+!tests/run.zsh

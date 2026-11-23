@@ -496,6 +496,15 @@ Here is a partial example how to work with prezto
 
 ```
 
+## Development
+
+    zsh tests/run.zsh
+
+Offline regression suite: every test runs in its own sandbox (temp
+`HOME`/`XDG_CONFIG_HOME`/`ZLOOM_DIR`) and remote plugins are simulated with
+local bare git repositories reached through `file://` URLs. The exit status
+is 0 only when every check passes.
+
 ## History
 
 zloom's story starts with [Antigen](https://github.com/zsh-users/antigen),
