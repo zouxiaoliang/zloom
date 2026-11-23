@@ -210,13 +210,19 @@ stamp.
 
 #### Add a plugin
 
-    zloom add <plugin> [location] [branch]
-    zloom add --defer <plugin> [location] [branch]
+    zloom add <plugin>[@ref] [location] [branch]
+    zloom add --defer <plugin>[@ref] [location] [branch]
 
 Clones the plugin if needed, loads it right away, appends it to the manifest
 and regenerates `init.zsh`; future shells pick it up automatically. With
 `--defer` the entry is recorded for turbo mode instead: future shells source
 it right after the first prompt.
+
+`@ref` pins a tag, branch or commit fisher-style (`zsh-users/zsh-autosuggestions@v0.7.0`).
+When no ref or branch is given, `zloom add` asks the remote for its default
+branch (one `git ls-remote`) and records it as a pin unless it is `master` —
+clone directories embed the branch, so the recorded pin keeps rebuilds
+deterministic and offline-safe on repositories whose default is `main`.
 
 #### Remove a plugin
 

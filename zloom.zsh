@@ -154,8 +154,9 @@ fi
     else
         # Sourced from antigen url resolution logic.
         # https://github.com/zsh-users/antigen/blob/master/antigen.zsh
-        # Expand short github url syntax: `username/reponame`.
-        if [[ $repo != git://* &&
+        # Expand short github url syntax: `username/reponame'.
+        if [[ $repo != *://* &&
+              $repo != git://* &&
               $repo != https://* &&
               $repo != http://* &&
               $repo != ssh://* &&
@@ -164,6 +165,39 @@ fi
             repo="https://github.com/${repo%.git}.git"
         fi
         -zlputs "${repo}"
+    fi
+}
+
+# Split a fisher-style `owner/repo@ref' pin: REPLY gets the repository,
+# REPLY_REF the pinned tag, branch or commit (empty when unpinned). Only
+# the last path component is considered, so URLs with userinfo
+# (`https://user@host/...'), git@ ssh remotes and local paths pass
+# through untouched.
+-zloom-split-ref() {
+    local spec="${1}"
+    REPLY="${spec}"
+    REPLY_REF=""
+    if [[ "${spec}" != /* && "${spec}" != .* && "${spec}" == */*@* ]] \
+            && [[ "${spec##*/}" == *@* ]]; then
+        REPLY="${spec%@*}"
+        REPLY_REF="${spec##*@}"
+    fi
+}
+
+# Query the remote HEAD branch of ${1}; REPLY is empty when the remote
+# cannot be reached. Costs one `git ls-remote' and is used only by
+# `zloom add' when no branch was pinned, so the manifest records the
+# detected branch and later rebuilds stay deterministic offline.
+-zloom-default-branch() {
+    REPLY=""
+    local url="$(-zloom-get-clone-url "${1}")"
+    local sym
+    sym="$(git ls-remote --symref "${url}" HEAD 2>/dev/null)"
+    sym="${sym%%$'\n'*}"
+    if [[ "${sym}" == ref:\ * ]]; then
+        sym="${sym#ref: }"
+        REPLY="${sym%%[[:space:]]*}"
+        REPLY="${REPLY#refs/heads/}"
     fi
 }
 
@@ -311,15 +345,17 @@ zloom-clone() {
 zloom-init() {
     if [[ -f "${ZLOOM_INIT}" ]]; then
         source "${ZLOOM_INIT}"
-    elif [[ -f "${ZLOOM_PLUGINS}" ]] \
-            || [[ -f "${ZLOOM_PLUGINS:h}/config.zsh" ]] \
-            || [[ -n ${ZLOOM_PLUGINS:h}/functions/*.zsh(NY1) ]] \
-            || [[ -n ${ZLOOM_PLUGINS:h}/conf.d/*.zsh(NY1) ]] \
-            || [[ -n ${ZLOOM_PLUGINS:h}/themes/*.zsh(NY1) ]]; then
-        # No init script yet, but the config directory has content
-        # (manifest, config files or function files): build the init
-        # script from it, so restoring ~/.config/zloom is all that is
-        # needed on a new machine.
+        return 0
+    fi
+
+    # Bootstrap only when the config directory actually has content: the
+    # manifest, config.zsh or any drop-in file. The globs have to be
+    # expanded here, outside `[[ ]]', for the (N) flag to apply.
+    local -a _zloom_scan=(${ZLOOM_PLUGINS:h}/conf.d/*.zsh(N) \
+        ${ZLOOM_PLUGINS:h}/functions/*.zsh(N) \
+        ${ZLOOM_PLUGINS:h}/themes/*.zsh(N))
+    if [[ -f "${ZLOOM_PLUGINS}" || -f "${ZLOOM_PLUGINS:h}/config.zsh" ]] \
+            || (( ${#_zloom_scan} )); then
         -zlpute "Building ${ZLOOM_INIT} from ${ZLOOM_PLUGINS:h} ..."
         -zloom-rebuild live
     fi
@@ -827,12 +863,20 @@ zloom-apply() {
 zloom-load() {
     if [[ "$#" == 0 ]]; then
         -zlpute '`load` requires at least one parameter:'
-        -zlpute '`zloom load <repo> [location] [branch]`'
+        -zlpute '`zloom load <repo>[@ref] [location] [branch]`'
     else
-        -zloom-resolve-location "${@}"
+        local -a _args=("${@}")
+        # fisher-style `owner/repo@ref' pin: tag, branch or commit. The
+        # ref overrides an explicit branch argument; URLs, git@ ssh
+        # remotes and local paths are left untouched.
+        -zloom-split-ref "${_args[1]}"
+        if [[ -n "${REPLY_REF}" ]]; then
+            _args=("${REPLY}" "${_args[2]:-}" "${REPLY_REF}")
+        fi
+        -zloom-resolve-location "${_args[@]}"
         local location="${REPLY}"
         local dir="${REPLY_DIR}"
-        local file="${2}"
+        local file="${_args[2]}"
         -zloom-visit-location "${location}" "${dir}" "${file}"
     fi
 }
@@ -1352,8 +1396,24 @@ zloom-add() {
 
     if (( ${#args} == 0 )); then
         -zlpute '`add` requires at least one parameter:'
-        -zlpute '`zloom add [--defer] <plugin> [location] [branch]`'
+        -zlpute '`zloom add [--defer] <plugin>[@ref] [location] [branch]`'
         return 1
+    fi
+
+    # When no branch is pinned, remember the remote's default branch in
+    # the manifest (`user/repo@main'): clone dirs embed the branch, so a
+    # recorded pin keeps later rebuilds deterministic and offline-safe.
+    if (( ${#args} == 1 )); then
+        local _repo="${args[1]}"
+        -zloom-split-ref "${_repo}"
+        _repo="${REPLY}"
+        if [[ -z "${REPLY_REF}" && "${_repo}" != /* && "${_repo}" != .* ]]; then
+            -zloom-default-branch "${_repo}"
+            if [[ -n "${REPLY}" && "${REPLY}" != master ]]; then
+                args[1]="${args[1]}@${REPLY}"
+                -zlpute "add: ${_repo} defaults to branch ${REPLY}; pinning it"
+            fi
+        fi
     fi
 
     -zloom-manifest-adopt-note
@@ -1632,6 +1692,9 @@ zloom-clean() {
             load|defer)
                 repo="${words[2]}"
                 branch="${words[4]:-master}"
+                -zloom-split-ref "${repo}"
+                repo="${REPLY}"
+                [[ -n "${REPLY_REF}" ]] && branch="${REPLY_REF}"
                 if (( ${#words} > 2 )) \
                         || [[ "${repo[1]}" != / && "${repo[1]}" != . ]]; then
                     -zloom-set-clone-dir "${repo}" "${branch}"
