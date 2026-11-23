@@ -190,6 +190,23 @@ zl 'zloom sync --clean >/dev/null 2>&1'
 [[ -e "${T}/data/"*bare.git-v1* ]] 2>/dev/null && no "sync --clean removes the orphan clone" || ok "sync --clean removes the orphan clone"
 rm -rf "${T}"
 
+print "12. data directory defaults: XDG data home, legacy layout falls back"
+sandbox
+zsh -c "
+    export XDG_CONFIG_HOME='${T}/xdg' XDG_DATA_HOME='${T}/xdgdata' ZDOTDIR='${T}' HOME='${T}/home'
+    source '${REPO}/zloom.zsh'
+    echo \"\${ZLOOM_DIR}\"
+" >! "${T}/out"
+check "fresh setup uses XDG data home" "${T}/xdgdata/zloom" "$(cat "${T}/out")"
+mkdir -p "${T}/home/.zloom"; touch "${T}/home/.zloom/init.zsh"
+zsh -c "
+    export XDG_CONFIG_HOME='${T}/xdg' XDG_DATA_HOME='${T}/xdgdata' ZDOTDIR='${T}' HOME='${T}/home'
+    source '${REPO}/zloom.zsh'
+    echo \"\${ZLOOM_DIR}\"
+" >! "${T}/out"
+check "legacy ~/.zloom with init.zsh wins" "${T}/home/.zloom" "$(cat "${T}/out")"
+rm -rf "${T}"
+
 print
 print "passed: ${passed}  failed: ${failed}"
 (( failed == 0 )) || exit 1

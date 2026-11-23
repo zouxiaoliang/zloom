@@ -182,10 +182,23 @@ Configuration and regenerable data live apart, fisher-style:
     ├── functions/              # one .zsh file per custom function
     ├── completions/            # custom completion files, joined to $fpath
     └── themes/                 # theme configs, sourced after the plugins
-    ~/.zloom/                   # safe to delete: rebuilt on demand
+    ~/.zloom/                   # the zloom program itself (a git clone)
+    ~/.local/share/zloom/       # safe to delete: rebuilt on demand
     ├── init.zsh                # generated from the manifest
     ├── <encoded-location>/…    # cloned plugins
     └── snippets/               # remote snippet cache
+
+(The data half honors `$XDG_DATA_HOME`; the whole tree regenerates from
+`~/.config/zloom` on the next start after deletion.)
+
+Upgrading from the single-directory layout — zloom storing data inside
+`~/.zloom` — is a one-time move; the generated init script embeds absolute
+paths, so delete it and let the next shell rebuild:
+
+    d="${XDG_DATA_HOME:-$HOME/.local/share}/zloom"; mkdir -p "$d"
+    mv ~/.zloom/init.zsh* ~/.zloom/completions.stamp "$d"/ 2>/dev/null
+    for dir in ~/.zloom/*(N/); do [[ ${dir:t} == .git ]] || mv "$dir" "$d"/; done
+    rm -f "$d"/init.zsh*
 
 The layout mirrors fish's `~/.config/fish`. On each start zloom sources, in
 order:
@@ -418,7 +431,7 @@ All variables are read when `zloom.zsh` is sourced, so set them before the
 
 | Variable | Default | Description |
 |---|---|---|
-| `ZLOOM_DIR` | `~/.zloom` | Root directory for clones, snippets, the manifest and the init script |
+| `ZLOOM_DIR` | `~/.local/share/zloom` | Data root: init script, plugin clones, snippet cache (a legacy `~/.zloom` holding `init.zsh` keeps being used) |
 | `ZLOOM_INIT` | `$ZLOOM_DIR/init.zsh` | Path of the generated static init script |
 | `ZLOOM_PLUGINS` | `~/.config/zloom/plugins.zsh` | Path of the plugin manifest (a pre-existing `$ZLOOM_DIR/plugins.zsh` wins) |
 | `ZLOOM_AUTOLOAD_COMPINIT` | auto | Enabled automatically unless `compinit` already ran; set to `0` to handle `compinit` yourself |

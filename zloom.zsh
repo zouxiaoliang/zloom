@@ -8,8 +8,16 @@ local ZLOOM_SOURCE="$0:A:h"
 -zlinit() { -zlputs "$*" >> "${ZLOOM_INIT}" ;}
 
 
+# Regenerable data (generated init script, plugin clones, snippet cache,
+# completions stamp) lives in the XDG data directory, away from the
+# program clone at ~/.zloom. Setups that predate the split keep using
+# ~/.zloom, detected by a generated init script inside the clone.
 if [[ -z "${ZLOOM_DIR}" ]]; then
-    ZLOOM_DIR="${HOME}/.zloom"
+    if [[ -f "${HOME}/.zloom/init.zsh" ]]; then
+        ZLOOM_DIR="${HOME}/.zloom"
+    else
+        ZLOOM_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/zloom"
+    fi
 fi
 
 if [[ -z "${ZLOOM_INIT}" ]]; then
