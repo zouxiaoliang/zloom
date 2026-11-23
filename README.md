@@ -236,6 +236,18 @@ unloaded from the running shell, but new shells stop sourcing it. Env, alias
 and function entries, however, are also removed from the running shell
 (`unset` / `unalias` / `unfunction`).
 
+#### Sync the world with the manifest
+
+    zloom sync
+    zloom sync --clean
+
+`zloom sync` reconciles everything with the manifest in one command —
+fisher's `update` model: hand-edit `plugins.zsh`, run `zloom sync`. It
+clones every `load`/`defer` repository that is missing on disk
+(concurrently), regenerates `init.zsh` from the manifest, and reports
+clones that are no longer referenced (with `--clean` it deletes them, like
+`zloom clean --force`). No `zloom reset` plus a new shell needed.
+
 #### Set a persistent environment variable
 
     zloom env KEY=VALUE

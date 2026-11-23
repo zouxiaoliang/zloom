@@ -36,6 +36,7 @@ _zloom_commands=(
     "saved:return 0 if an init script exists"
     "selfupdate:update zloom from its repository"
     "snippet:load a local or remote configuration file"
+    "sync:reconcile clones and init.zsh with the manifest"
     "update:update all repositories and remove the init script"
 )
 

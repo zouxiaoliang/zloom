@@ -1655,6 +1655,65 @@ zloom-del() {
     -zlpute "removed ${name} (files stay on disk; init.zsh regenerated)"
 }
 
+# `zloom sync [--clean]': make the world match the manifest — fisher's
+# update model. Clones every load/defer repository that is missing on
+# disk (concurrently), regenerates init.zsh from the manifest, and runs
+# `zloom clean' on the result (deleting unreferenced clones with
+# --clean). Hand edits to the manifest thus take effect with one
+# command, no `zloom reset' plus a new shell needed.
+zloom-sync() {
+    local clean=""
+    if [[ "${1}" == "--clean" || "${1}" == "-c" ]]; then
+        clean=1
+        shift
+    fi
+    if (( $# > 0 )); then
+        -zlpute '`sync` takes no parameters:'
+        -zlpute '`zloom sync [--clean]`'
+        return 1
+    fi
+    if [[ ! -f "${ZLOOM_PLUGINS}" ]]; then
+        -zlpute "sync: manifest ${ZLOOM_PLUGINS} not found"
+        return 1
+    fi
+
+    # Prefetch missing clones concurrently; the rebuild below then finds
+    # every directory present and records entries in manifest order.
+    # Repositories that fail to clone surface as load errors in the
+    # rebuild, keeping the reporting in one place.
+    local line repo branch dir
+    local -a words jobs=()
+    while IFS= read -r line; do
+        -zloom-manifest-words "${line}"
+        words=("${reply[@]}")
+        (( ${#words} >= 2 )) || continue
+        [[ "${words[1]}" == (load|defer) ]] || continue
+        repo="${words[2]}"
+        branch="${words[4]:-master}"
+        -zloom-split-ref "${repo}"
+        repo="${REPLY}"
+        [[ -n "${REPLY_REF}" ]] && branch="${REPLY_REF}"
+        [[ "${repo}" == /* || "${repo}" == .* ]] && continue
+        -zloom-set-clone-dir "${repo}" "${branch}"
+        dir="${REPLY}"
+        [[ -d "${dir}" ]] && continue
+        -zlpute "sync: cloning ${repo}@${branch} ..."
+        ( zloom-clone "${repo}" "${branch}" ) &
+        jobs+=($!)
+    done < "${ZLOOM_PLUGINS}"
+    (( ${#jobs} )) && wait "${jobs[@]}"
+
+    -zloom-rebuild
+
+    # Clones the manifest no longer references: report, or delete.
+    if [[ -n "${clean}" ]]; then
+        zloom-clean --force
+    else
+        zloom-clean
+    fi
+    return 0
+}
+
 # `zloom clean': remove cloned plugins that the manifest no longer lists.
 # Without --force it is a dry run that only reports them. Snippets and the
 # zloom installation itself are never touched.
@@ -1906,7 +1965,7 @@ zloom() {
         -zlputs 'usage: `zloom [command | instruction] [options]`'
         -zlputs "    plugin management: add, del, snippet, clean"
         -zlputs '    settings: env, alias, func, eval'
-        -zlputs "    commands: list, saved, reset, clone, update, selfupdate"
+        -zlputs "    commands: list, saved, reset, sync, clone, update, selfupdate"
         -zlputs "    instructions: load, defer, oh-my-zsh, pmodule, prezto, save, apply"
         return 1
     fi
