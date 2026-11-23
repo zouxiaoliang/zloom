@@ -16,12 +16,13 @@ manifest with `zloom add`, `zloom del`, `zloom snippet`, `zloom env` and
 - **Static init script** — plugins are resolved once at `zloom save` time;
   starting a shell is just `source init.zsh`.
 - **Fisher-style manifest** — a plain-text `plugins.zsh` lists everything the
-  shell should load; copying that one file to a new machine restores your
-  whole setup.
+  shell should load; syncing that one folder (`~/.config/zloom`) to a new
+  machine restores your whole setup.
 - **Turbo mode** — `zloom defer` / `zloom add --defer` postpones heavy plugins
   until right after the first prompt appears.
-- **Settings included** — `zloom env` and `zloom alias` persist environment
-  variables and aliases through the same manifest.
+- **Settings included** — `zloom env`, `zloom alias`, `zloom func` and
+  `zloom eval` persist environment variables, aliases, functions and
+  command-generated setup through the same manifest.
 - **Byte-compiled everywhere** — the init script, every sourced plugin script
   and the `compinit` dump are cached as `.zwc` bytecode and invalidated
   automatically when their source changes.
@@ -155,19 +156,57 @@ Notes:
 Instead of the `if ! zloom saved` block in `.zshrc`, plugins can be managed
 through a plain-text manifest, inspired by
 [fisher](https://github.com/jorgebucaran/fisher). The manifest lives at
-`${ZLOOM_DIR}/plugins.zsh` (override with `$ZLOOM_PLUGINS`) and holds one entry
-per line:
+`${XDG_CONFIG_HOME:-~/.config}/zloom/plugins.zsh` (override with
+`$ZLOOM_PLUGINS`; a pre-existing `${ZLOOM_DIR}/plugins.zsh` keeps being used)
+and holds one entry per line:
 
     load zsh-users/zsh-completions src
     defer zsh-users/zsh-autosuggestions
     snippet https://example.com/raw/config.zsh
     env EDITOR=vim
     alias ll 'ls -la'
+    func hello 'echo Hello ${1:-zloom}'
+    eval /opt/homebrew/bin/brew shellenv
 
 Blank lines and `#` comments are ignored. Whenever the init script is
 missing (fresh machine, `zloom reset`, `zloom update`), zloom rebuilds it from
 the manifest automatically, so the manifest file is all you need to restore
 your setup on a new machine.
+
+Configuration and regenerable data live apart, fisher-style:
+
+    ~/.config/zloom/            # sync this: your configuration
+    ├── plugins.zsh             # the manifest
+    ├── config.zsh              # main user config, sourced before the plugins
+    ├── conf.d/                 # drop-in config fragments, no registration needed
+    ├── functions/              # one .zsh file per custom function
+    ├── completions/            # custom completion files, joined to $fpath
+    └── themes/                 # theme configs, sourced after the plugins
+    ~/.zloom/                   # safe to delete: rebuilt on demand
+    ├── init.zsh                # generated from the manifest
+    ├── <encoded-location>/…    # cloned plugins
+    └── snippets/               # remote snippet cache
+
+The layout mirrors fish's `~/.config/fish`. On each start zloom sources, in
+order:
+
+1. the manifest's `env` and `eval` entries (the manifest-managed environment)
+2. `conf.d/*.zsh`, alphabetical, then `config.zsh` — your hand-written config
+3. the manifest's `load`/`defer`/`snippet` plugins
+4. the manifest's `alias` entries
+5. `functions/*.zsh`, alphabetical
+6. `themes/*.zsh`, alphabetical — prompt configs go here, so they can address
+   the prompt framework the plugins just loaded
+7. `completions/` joins `$fpath` and `compinit` runs
+
+The `conf.d/`, `functions/`, `completions/` and `themes/` scans are baked
+into the generated `init.zsh`: dropping a file into any of them (or removing
+one) takes effect on the **next shell start without a rebuild**. For
+`completions/` this works because the generated `init.zsh` keeps a stamp of
+the directory's file list (`${ZLOOM_DIR}/completions.stamp`): an unchanged
+list takes the fork-free `compinit -C` fast path, while adding or removing a
+file triggers one full `compinit` rescan that picks it up and refreshes the
+stamp.
 
 #### Add a plugin
 
@@ -183,13 +222,13 @@ it right after the first prompt.
 
     zloom del <plugin>
     zloom del <snippet-url-or-path>
-    zloom del <env-KEY | alias-NAME>
+    zloom del <env-KEY | alias-NAME | func-NAME>
 
 Removes the matching entry from the manifest and regenerates `init.zsh`. The
 plugin files stay on disk (exactly like `zloom reset`); a plugin cannot be
-unloaded from the running shell, but new shells stop sourcing it. Env and
-alias entries, however, are also removed from the running shell (`unset` /
-`unalias`).
+unloaded from the running shell, but new shells stop sourcing it. Env, alias
+and function entries, however, are also removed from the running shell
+(`unset` / `unalias` / `unfunction`).
 
 #### Set a persistent environment variable
 
@@ -214,6 +253,50 @@ all plugins are sourced, so they win over aliases a plugin may define (again
 regardless of where the entry sits in the manifest). Re-running `zloom alias`
 for the same NAME updates the entry in place.
 
+#### Define a persistent function
+
+    zloom func NAME=BODY
+    zloom func NAME BODY...
+
+Defines the function right away (`NAME() { BODY }`), appends the entry to
+the manifest and regenerates `init.zsh`. Like aliases, functions are defined
+after all plugins are sourced, so they win over plugin-provided ones. The
+body is stored as a single line — anything larger belongs in a snippet file.
+Re-running `zloom func` for the same NAME updates the entry in place;
+`zloom del NAME` also `unfunction`s it from the running shell.
+
+#### Function files
+
+    ~/.config/zloom/functions/
+    ├── fixcmd.zsh
+    └── hello.zsh
+
+Besides the one-line `zloom func` entries, custom functions can live as one
+`*.zsh` file each in the `functions/` directory next to the manifest — the
+fish convention. Every file is sourced on each start, after plugins and
+aliases, so the functions win over plugin-provided ones. Each file is
+byte-compiled automatically on first use.
+
+The scan loop lives in the generated `init.zsh` itself, so adding or
+removing a file takes effect on the **next shell start without a rebuild** —
+just drop the file in. A functions-only directory bootstraps the init script
+even without a manifest, and nothing else in your setup is affected.
+
+#### Evaluate a command's output at startup
+
+    zloom eval <command...>
+
+Runs `eval "$(command)"` right away and records the entry in the manifest.
+In the generated `init.zsh` eval entries run after the `env` exports but
+**before any plugin is sourced**, in manifest order, so plugins see the PATH
+and functions they set up — the natural home for things like
+`zloom eval /opt/homebrew/bin/brew shellenv` or
+`zloom eval rbenv init - zsh`. Use absolute paths when the command only
+becomes available through the eval itself. The command must succeed and its
+output is evaluated as zsh code; unlike env values or aliases, an eval
+cannot be undone in the running shell (`zloom del` only stops future shells
+from running it).
+
 #### Load a local or remote snippet
 
     zloom snippet <url-or-path>
@@ -223,6 +306,15 @@ local path or downloaded from a URL. Remote snippets are cached under
 `${ZLOOM_DIR}/snippets` and refreshed by `zloom update`; the origin URL is
 recorded in a `.url` sidecar file. The entry is added to the manifest so it
 keeps loading in future shells.
+
+Local snippet paths are stored relative to the manifest directory when the
+file lives inside it (e.g. `snippet snippets/config.zsh` for
+`~/.config/zloom/snippets/config.zsh`), so the whole config folder can be
+synced to another machine as-is; relative entries resolve against the
+manifest directory at load time.
+
+For local config fragments that should load on every start, prefer dropping
+a file into `conf.d/` instead — no manifest entry and no rebuild needed.
 
 Note: once the manifest exists it is the source of truth for `init.zsh`.
 Plugins that were only loaded inside the `.zshrc` `if ! zloom saved` block
@@ -310,7 +402,7 @@ All variables are read when `zloom.zsh` is sourced, so set them before the
 |---|---|---|
 | `ZLOOM_DIR` | `~/.zloom` | Root directory for clones, snippets, the manifest and the init script |
 | `ZLOOM_INIT` | `$ZLOOM_DIR/init.zsh` | Path of the generated static init script |
-| `ZLOOM_PLUGINS` | `$ZLOOM_DIR/plugins.zsh` | Path of the plugin manifest |
+| `ZLOOM_PLUGINS` | `~/.config/zloom/plugins.zsh` | Path of the plugin manifest (a pre-existing `$ZLOOM_DIR/plugins.zsh` wins) |
 | `ZLOOM_AUTOLOAD_COMPINIT` | auto | Enabled automatically unless `compinit` already ran; set to `0` to handle `compinit` yourself |
 | `ZLOOM_CUSTOM_COMPDUMP` | — | Custom `compinit` dump path |
 | `ZLOOM_RESET_ON_CHANGE` | — | List of files; when one of them changes, the init script is reset automatically (see [Watch files for modifications](#watch-files-for-modifications)) |
