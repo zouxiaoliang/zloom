@@ -375,7 +375,18 @@ zl 'true' >/dev/null 2>&1
 out="$(zl 'zloom doctor' 2>&1)"; rc="$(zl 'zloom doctor >/dev/null 2>&1; echo rc=$?')"
 grep -q 'all checks passed' <<< "${out}" && ok "healthy setup reports success" || no "healthy setup reports success" "" "${out}"
 grep -q 'rc=0' <<< "${rc}" && ok "healthy setup exits 0" || no "healthy setup exits 0" "" "${rc}"
-grep -q 'interactive shell starts in' <<< "${out}" && ok "reports a shell start time" || no "reports a shell start time" "" "${out}"
+# The startup timing must be the true median of the three samples it
+# prints — a nested `zsh -ic' inside the sandbox is slow but consistent,
+# which is exactly what a wrong sort would expose.
+tline="$(grep -m1 'starts in' <<< "${out}")"
+if [[ "${tline}" =~ 'in[[:space:]]+([0-9]+) ms \(median of ([0-9]+), ([0-9]+), ([0-9]+)\)' ]]; then
+    _rep="${match[1]}"; _a=("${match[2]}" "${match[3]}" "${match[4]}")
+    local -a _s=("${(@on)_a}")
+    [[ "${_rep}" == "${_s[2]}" ]] && ok "startup timing reports the true median (${tline##*starts })" \
+        || no "startup timing reports the true median" "${_s[2]}" "${_rep}"
+else
+    no "startup timing reports the true median" "<ms> ms (median of a, b, c)" "${tline}"
+fi
 grep -q 'init.zsh sections, heaviest first' <<< "${out}" && ok "reports per-section init.zsh timing" || no "reports per-section init.zsh timing" "" "${out}"
 grep -q 'General modules' <<< "${out}" && ok "section timing names the plugin section" || no "section timing names the plugin section" "" "${out}"
 [[ -e "${T}/data/.zloom-doctor-probe.zsh" ]] && no "timing probe cleans up its temp file" || ok "timing probe cleans up its temp file"

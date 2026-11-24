@@ -2216,6 +2216,9 @@ zloom-saved() {
     fi
 
     -zlputs "  [time]   init.zsh sections, heaviest first (ms):"
+    # @ keeps the sorted rows an array of whole lines (section names
+    # contain spaces); n sorts numerically on the leading millisecond
+    # field, in reverse.
     for _line in "${(@On)_rows}"; do
         -zlputs "  [time]   ${_line}"
     done
@@ -2365,9 +2368,26 @@ zloom-doctor() {
     fi
 
     if zmodload zsh/datetime 2>/dev/null; then
-        local t0=${EPOCHREALTIME}
+        # A single measurement is misleading: the first shell after a
+        # rebuild pays for byte-compiling and cold caches. Warm up once,
+        # then take the median of three, which is the number a user
+        # actually experiences day to day.
+        local t0 _ms
+        local -a _samples=()
+        integer i
         zsh -ic 'exit' >/dev/null 2>&1
-        printf '  [time]   interactive shell starts in %4.0f ms\n' $(( (EPOCHREALTIME - t0) * 1000 ))
+        for (( i = 1; i <= 3; i++ )); do
+            t0=${EPOCHREALTIME}
+            zsh -ic 'exit' >/dev/null 2>&1
+            _ms=$(( (EPOCHREALTIME - t0) * 1000 + 0.5 ))
+            _samples+=("${_ms%.*}")
+        done
+        # Median of three = the middle element once sorted numerically.
+        # The @ keeps the sorted result an array: without it the whole
+        # list comes back as one string.
+        local -a _sorted=("${(@on)_samples}")
+        printf '  [time]   interactive shell starts in %4s ms (median of %s)\n' \
+            "${_sorted[2]}" "${(j:, :)_samples}"
         -zloom-doctor-sections
     fi
 
