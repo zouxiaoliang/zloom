@@ -236,9 +236,13 @@ zloom-clone() {
     if [[ ! -d "${dir}" ]]; then
         mkdir -p "${dir}"
         if [[ "${branch}" == HEAD ]]; then
-            # @HEAD pin (offline default-branch fallback): clone the
-            # remote's default branch, whatever it is.
-            git clone --depth=1 --recursive "${url}" "${dir}"
+            # @HEAD pin (offline default-branch fallback): follow the
+            # remote's default branch, whatever it is called. Left on a
+            # local branch it would stop following a rename of that
+            # default branch (git pull tracks the old name), so detach at
+            # the tip; update paths re-check out the remote's HEAD.
+            git clone --depth=1 --recursive "${url}" "${dir}" \
+                && git -C "${dir}" checkout --quiet --detach
         else
             git clone --depth=1 --recursive -b "${branch}" "${url}" "${dir}"
         fi
@@ -366,12 +370,25 @@ zloom-clone() {
     local params="$*"
     local cmd="pmodload ${params[@]}"
 
-    # execute in place
-    eval $cmd
-
-    if [[ ! "${ZLOOM_PREZTO[@]}" =~ "${cmd}" ]]; then
-        ZLOOM_PREZTO_LOAD+=("${params[@]}")
+    # Execute in place. pmodload only exists once prezto's init.zsh has
+    # been sourced, so a module requested ahead of it cannot load; that
+    # must surface as a failure instead of being recorded as loaded.
+    if (( ! $+functions[pmodload] )); then
+        -zlpute "prezto: cannot load module(s) ${params} -- run \`zloom prezto' first"
+        return 1
     fi
+    eval $cmd || return $?
+
+    # Deduplicate against the recorded loads. The guard has to look at
+    # ZLOOM_PREZTO_LOAD itself: testing an array that is never set (the
+    # upstream typo read ZLOOM_PREZTO) is always empty, so every repeat
+    # was appended again and init.zsh grew a little on each rebuild.
+    local recorded
+    for recorded in "${ZLOOM_PREZTO_LOAD[@]}"; do
+        [[ "${recorded}" == "${params}" ]] && return 0
+    done
+    ZLOOM_PREZTO_LOAD+=("${params[@]}")
+    return 0
 }
 
 zloom-init() {
@@ -448,13 +465,24 @@ zloom-reset() {
             git -C "${dir}" symbolic-ref -q HEAD >/dev/null 2>&1 && continue
             -zlpute "Updating '${dir:t}' (${ref}) ..."
             if [[ "${ref}" == HEAD ]]; then
+                # @HEAD follows whatever the remote's default branch is,
+                # including a rename of it: ask the remote which commit its
+                # HEAD names, fetch that exact object and check it out. A
+                # plain `git fetch' would not reach a renamed branch in a
+                # shallow clone, and FETCH_HEAD is not reliable there.
                 ( cd "${dir}" \
-                    && git fetch --quiet origin \
-                    && git checkout --quiet FETCH_HEAD ) &
+                    && __zl_head="$(git ls-remote --exit-code origin HEAD 2>/dev/null)" \
+                    && __zl_head="${__zl_head%%$'\t'*}" \
+                    && [[ "${__zl_head}" =~ '^[0-9a-f]{40}$' ]] \
+                    && git fetch --quiet --depth=1 origin "${__zl_head}" \
+                    && git checkout --quiet --detach "${__zl_head}" \
+                    && git submodule update --init --recursive --quiet ) &
             else
+                # Force the local tag to the remote's: git rejects a plain
+                # fetch of a tag that already exists with a different
+                # target ("would clobber existing tag").
                 ( cd "${dir}" \
-                    && git fetch --quiet origin \
-                    && { git fetch --quiet origin "tag ${ref}" 2>/dev/null || :; } \
+                    && git fetch --quiet --force origin "+refs/tags/${ref}:refs/tags/${ref}" \
                     && git checkout --quiet "${ref}" \
                     && git submodule update --init --recursive --quiet ) &
             fi
@@ -519,7 +547,7 @@ zloom-update() {
         local -a _old=("${_recorded[_n+1,-1]}")
         local -a _new=("${(@f)$(cksum ${=_files} 2>/dev/null)}")
         if [[ "${(F)_new}" != "${(F)_old}" ]]; then
-            printf %s\\n '-- zloom: Files in $ZLOOM_RESET_ON_CHANGE changed; resetting `init.zsh`...'
+            printf %s\\n "-- zloom: ${ZLOOM_RESET_ON_CHANGE} changed; resetting \`init.zsh\`..."
             zloom reset
         fi
     fi
@@ -1067,13 +1095,16 @@ zloom-defer() {
 # the second word of load/defer/snippet entries, the KEY/NAME part of
 # `env KEY=VALUE', `alias NAME=VALUE' and `func NAME=BODY' entries (the
 # latter also match hand-written NAME=VALUE lines), and the full command
-# of `eval COMMAND' entries.
+# of `eval COMMAND' entries. Takes the whole lexed line (kind first) so
+# eval keys cover every word of the command — the same string
+# `zloom eval' uses to update an entry in place.
 -zloom-manifest-key() {
-    if [[ "${1}" == (env|alias|func) ]]; then
-        REPLY="${${2}%%=*}"
-    else
-        REPLY="${2}"
-    fi
+    local -a _w=("${@}")
+    case "${_w[1]}" in
+        env|alias|func) REPLY="${${_w[2]}%%=*}" ;;
+        eval)           REPLY="${(j: :)_w[2,-1]}" ;;
+        *)              REPLY="${_w[2]}" ;;
+    esac
 }
 
 # Replace every manifest entry whose key (see -zloom-manifest-key)
@@ -1090,7 +1121,7 @@ zloom-defer() {
         words=("${reply[@]}")
         if (( ${#words} >= 2 )) \
                 && [[ "${words[1]}" == (load|defer|snippet|env|alias|func|eval) ]]; then
-            -zloom-manifest-key "${words[1]}" "${words[2]}"
+            -zloom-manifest-key "${(@)words}"
             if [[ "${REPLY}" == "${key}" ]]; then
                 (( replaced )) || out+=("${new}")
                 replaced=1
@@ -1728,7 +1759,7 @@ zloom-del() {
         words=("${reply[@]}")
         if (( ${#words} >= 2 )) \
                 && [[ "${words[1]}" == (load|defer|snippet|env|alias|func|eval) ]]; then
-            -zloom-manifest-key "${words[1]}" "${words[2]}"
+            -zloom-manifest-key "${(@)words}"
             if [[ "${REPLY}" == "${name}" ]]; then
                 removed=1
                 [[ "${words[1]}" == env ]] && unset_env=1
@@ -2010,8 +2041,18 @@ zloom-clean() {
         if [[ "${branch}" == HEAD ]]; then
             rsha="$(git ls-remote "${url}" HEAD 2>/dev/null)"
         else
-            rsha="$(git ls-remote "${url}" "refs/heads/${branch}" 2>/dev/null)"
-            [[ -n "${rsha}" ]] || rsha="$(git ls-remote "${url}" "refs/tags/${branch}" 2>/dev/null)"
+            # An annotated tag's ref points at a tag object, not a commit;
+            # the peeled `^{}' ref does. Ask for both and let the peeled
+            # one win when the remote lists it.
+            local -a _refs=("${(@f)$(git ls-remote "${url}" "refs/heads/${branch}" \
+                "refs/tags/${branch}" "refs/tags/${branch}^{}" 2>/dev/null)}")
+            rsha=""
+            local _r
+            for _r in "${_refs[@]}"; do
+                [[ -n "${_r}" ]] || continue
+                rsha="${_r%%$'\t'*}"
+                [[ "${_r}" == *'^{}'* ]] && break
+            done
         fi
         rsha="${rsha%%$'\t'*}"
         if [[ -z "${rsha}" ]]; then
@@ -2114,6 +2155,105 @@ zloom-saved() {
 -zloom-dr-ok()   { printf '  [ok]     %s\n' "$*" ;}
 -zloom-dr-warn() { printf '  [warn]   %s\n' "$*" ;}
 
+# Per-section timing of the generated init script — without instrumenting
+# it. A throwaway copy gets a timestamp line in front of every `# ###'
+# header and is sourced by a child shell in place of the real file, so
+# the steady-state init.zsh carries no timing code at all.
+-zloom-doctor-sections() {
+    [[ -f "${ZLOOM_INIT}" ]] || return 1
+    local probe="${ZLOOM_INIT:h}/.zloom-doctor-probe.zsh"
+    local _s _line _name
+    local -a _l=() _o=()
+    while IFS= read -r _s; do _l+=("${_s}"); done < "${ZLOOM_INIT}"
+
+    # Each section header in init.zsh is preceded by two probe lines: one
+    # that closes the previous section (append its name and elapsed
+    # milliseconds) and restarts the clock, and one naming the section
+    # that now starts. The lines are plain single-quoted shell code; the
+    # name is supplied as a separate statement so no quoting is spliced
+    # into them. Rounding relies on assignment to an `integer' variable:
+    # zsh floats stay floats under `% 1', and int() would need
+    # zsh/mathfunc, which is not assumed here.
+    local _close='integer __zloom_ms; (( __zloom_ms = (EPOCHREALTIME - __zloom_t) * 1000 + 0.5 )); __zloom_dt+=("${__zloom_ms} ${__zloom_sec}"); __zloom_t=$EPOCHREALTIME'
+    _o=('zmodload zsh/datetime 2>/dev/null || { __zloom_nodate=1; __zloom_t=0 }'
+        '__zloom_t=$EPOCHREALTIME; __zloom_sec=')
+    for _s in "${_l[@]}"; do
+        if [[ "${_s}" == '# ### '* ]]; then
+            _o+=("${_close}")
+            _o+=("__zloom_sec=${(qq)${_s#'# ### '}}")
+        fi
+        _o+=("${_s}")
+    done
+    _o+=("${_close}")
+    -zlputs "${_o[@]}" >! "${probe}"
+
+    # Interactive child, so the startup files apply exactly as in a real
+    # shell; they load the probe through $ZLOOM_INIT. The fallback covers
+    # setups whose startup files do not source zloom themselves. stderr is
+    # kept: a probe that fails must be visible, not silently empty.
+    local _err="${probe}.err"
+    local _out="$(ZLOOM_INIT="${probe}" \
+        ZLOOM_DIR="${ZLOOM_DIR}" ZLOOM_PLUGINS="${ZLOOM_PLUGINS}" \
+        ZLOOM_CUSTOM_COMPDUMP="${ZLOOM_CUSTOM_COMPDUMP:-}" \
+        zsh -ic '(( ${+__zloom_dt} )) || { source '"${(q)ZLOOM_SOURCE}"'/zloom.zsh >/dev/null 2>&1 }
+                  print -r -- "ZLOOM_DT_NODATE:${__zloom_nodate:-0}"
+                  for __e in "${__zloom_dt[@]}"; do print -r -- "ZLOOM_DT:${__e}"; done' 2>"${_err}")"
+    local _probe_err="$(<${_err})"
+    rm -f "${probe}" "${probe}.zwc" "${_err}"
+
+    # Report lines are "<ms>  <name>", heaviest first: numeric sort (n) on
+    # the right-aligned leading field, reversed (O).
+    local -a _rows=()
+    for _line in ${(f)_out}; do
+        [[ "${_line}" == ZLOOM_DT:* && "${_line}" == ZLOOM_DT:<->\ * ]] || continue
+        _line="${_line#ZLOOM_DT:}"
+        [[ -n "${_line#* }" ]] || continue       # preamble ahead of the first header
+        _rows+=("${(l:6:: :: :)${_line%% *}}  ${_line#* }")
+    done
+    if (( ! ${#_rows} )); then
+        -zlpute "doctor: section timing produced no data${_probe_err:+ (${_probe_err//$'\n'/; })}"
+        return 1
+    fi
+
+    -zlputs "  [time]   init.zsh sections, heaviest first (ms):"
+    for _line in "${(@On)_rows}"; do
+        -zlputs "  [time]   ${_line}"
+    done
+    -zlputs "  [time]   (deferred plugins are sourced after the first prompt, off the startup path)"
+    return 0
+}
+
+# Manifest lint for `zloom doctor': every non-blank, non-comment line must
+# lex to a known entry kind, and the words the loader ignores must be
+# empty. Lines are parsed with the very function the loader uses, so what
+# this accepts is exactly what gets loaded. `env' and `snippet' consume
+# their second word only (a value with spaces belongs in quotes), so a
+# third word on those lines would be dropped silently. Prints one
+# "<lineno>: <line>" per problem.
+-zloom-manifest-lint() {
+    [[ -f "${ZLOOM_PLUGINS}" ]] || return 0
+    local line n=0
+    local -a words
+    while IFS= read -r line; do
+        (( n++ ))
+        -zloom-manifest-words "${line}"
+        words=("${reply[@]}")
+        (( ${#words} )) || continue
+        case "${words[1]}" in
+            load|defer|alias|func|eval)
+                (( ${#words} >= 2 )) || print -r -- "${n}: ${line}"
+                ;;
+            env|snippet)
+                (( ${#words} == 2 )) || print -r -- "${n}: ${line}"
+                ;;
+            *)
+                print -r -- "${n}: ${line}"
+                ;;
+        esac
+    done < "${ZLOOM_PLUGINS}"
+    return 0
+}
+
 # `zloom doctor': sanity-check the setup — program, manifest, generated
 # init script, clones, drop-in directories, completion caches — and time
 # one interactive shell start as a regression probe for the fast static
@@ -2135,6 +2275,21 @@ zloom-doctor() {
 
     if [[ -f "${ZLOOM_PLUGINS}" ]]; then
         -zloom-dr-ok "manifest: ${ZLOOM_PLUGINS}"
+        # Lines the loader would silently ignore: unknown entry kinds, or
+        # entries missing their argument. Cheap to catch here, confusing
+        # when a hand-edited manifest looks right but does nothing.
+        # Empty output splits into one empty element, which is dropped
+        # so a clean manifest does not count as "1 ignored line".
+        local -a _zloom_bad=("${(@f)$(-zloom-manifest-lint)}")
+        _zloom_bad=("${(@)_zloom_bad:#}")
+        if (( ${#_zloom_bad} )); then
+            -zloom-dr-warn "${#_zloom_bad} manifest line(s) ignored by zloom:"
+            local _b
+            for _b in "${_zloom_bad[@]}"; do
+                printf '           %s\n' "${_b}"
+            done
+            (( warns++ ))
+        fi
     else
         -zloom-dr-warn "manifest missing: ${ZLOOM_PLUGINS}"
         (( warns++ ))
@@ -2191,12 +2346,29 @@ zloom-doctor() {
             -zloom-dr-warn "completions/ has files but no stamp (full compinit pending)"
             (( warns++ ))
         fi
+
+        # Dump versus fpath: every command a file declares in its
+        # `#compdef' line must be registered in this shell.
+        local cf cl cc
+        integer unreg=0
+        for cf in "${_zloom_cpl[@]}"; do
+            cl="${${(f)"$(<${cf})"}[1]}"
+            [[ "${cl}" == '#compdef '* && "${cl}" != *' -'* ]] || continue
+            for cc in ${=${cl#\#compdef }}; do
+                (( $+_comps[${cc}] )) || { (( unreg++ )); }
+            done
+        done
+        if (( unreg )); then
+            -zloom-dr-warn "${unreg} completion command(s) from completions/ not registered -- rerun compinit without -C, or \`zloom reset'"
+            (( warns++ ))
+        fi
     fi
 
     if zmodload zsh/datetime 2>/dev/null; then
         local t0=${EPOCHREALTIME}
         zsh -ic 'exit' >/dev/null 2>&1
-        printf '  [info]   interactive shell starts in %4.0f ms\n' $(( (EPOCHREALTIME - t0) * 1000 ))
+        printf '  [time]   interactive shell starts in %4.0f ms\n' $(( (EPOCHREALTIME - t0) * 1000 ))
+        -zloom-doctor-sections
     fi
 
     (( warns )) && { -zlpute "doctor: ${warns} warning(s)"; return 1; }
@@ -2244,6 +2416,7 @@ zloom-selfupdate() {
 
     local cur="$(git -C "${ZLOOM_SOURCE}" rev-parse HEAD 2>/dev/null)"
     ( cd "${ZLOOM_SOURCE}" && git pull --quiet ) || return 1
+    mkdir -p "${ZLOOM_DIR}"
     [[ -n "${cur}" ]] && -zlputs "${cur}" >! "${prev}"
     local new="$(git -C "${ZLOOM_SOURCE}" rev-parse HEAD 2>/dev/null)"
     zloom reset

@@ -13,6 +13,36 @@
 #
 # ------------------------------------------------------------------------------
 
+# Print the keys `zloom del' accepts, one per line: plugin specs, snippet
+# sources, env/alias/func names and full eval commands. Plain manifest
+# parsing with no dependency on the completion system, so it can be
+# tested directly.
+_zloom_manifest_entries() {
+    local m="${ZLOOM_PLUGINS:-${XDG_CONFIG_HOME:-$HOME/.config}/zloom/plugins.zsh}"
+    [[ -f "${m}" ]] || m="${HOME}/.zloom/plugins.zsh"
+    [[ -f "${m}" ]] || return 0
+    local line i
+    local -a w
+    while IFS= read -r line; do
+        [[ "${line}" =~ '^[[:space:]]*($|#)' ]] && continue
+        w=(${(Q)${(z)line}})
+        # strip an unquoted trailing comment, like -zloom-manifest-words
+        for (( i = 1; i <= ${#w}; i++ )); do
+            if [[ "${w[i]}" == "#" ]]; then
+                w=("${(@)w[1,i-1]}")
+                break
+            fi
+        done
+        (( ${#w} >= 2 )) || continue
+        case "${w[1]}" in
+            load|defer|snippet) print -r -- "${w[2]}" ;;
+            env|alias|func)     print -r -- "${${w[2]}%%=*}" ;;
+            eval)               print -r -- "${(j: :)w[2,-1]}" ;;
+        esac
+    done < "${m}"
+    return 0
+}
+
 _zloom() {
     local -a _zloom_commands
     _zloom_commands=(
@@ -50,45 +80,28 @@ _zloom() {
             _describe -t commands "zloom subcommand" _zloom_commands
             ;;
         args)
-            # Arguments that complete from the manifest: entry keys as
-            # accepted by `zloom del'.
-            local m="${ZLOOM_PLUGINS:-${XDG_CONFIG_HOME:-$HOME/.config}/zloom/plugins.zsh}"
-            [[ -f $m ]] || m="$HOME/.zloom/plugins.zsh"
-            local -a entries
-            local line
-            if [[ -f $m ]]; then
-                while IFS= read -r line; do
-                    [[ "$line" =~ '^[[:space:]]*($|#)' ]] && continue
-                    local -a w
-                    w=(${(Q)${(z)line}}) 2>/dev/null
-                    (( $#w >= 2 )) || continue
-                    case $w[1] in
-                        load|defer|snippet|env|alias|func|eval)
-                            entries+=("${${w[2]}%%=*}")
-                            ;;
-                    esac
-                done < $m
-            fi
             case $words[1] in
                 del)
+                    # Entry keys straight from the manifest.
+                    local -a entries
+                    entries=("${(@f)$(_zloom_manifest_entries)}")
                     (( $#entries )) && _describe -t entries "manifest entry" entries
                     ;;
+                add)
+                    _arguments '(--defer -d)'{--defer,-d}'[load right after the first prompt (turbo)]'
+                    ;;
                 sync)
-                    _values -w flag '--clean[delete unreferenced clones]' \
+                    _arguments '--clean[delete unreferenced clones]' \
                         '--update[also pull existing clones]'
                     ;;
                 clean)
-                    _values -w flag '--force[delete unreferenced clones]'
+                    _arguments '--force[delete unreferenced clones]'
                     ;;
                 list)
-                    _values -w flag '--outdated[compare clones with their remote refs]'
+                    _arguments '--outdated[compare clones with their remote refs]'
                     ;;
                 selfupdate)
-                    _values -w flag '--rollback[restore the previous revision]'
-                    ;;
-                reset|apply|saved|update|doctor|version|loadall|oh-my-zsh)
-                    ;;
-                add|load|defer|clone|pmodule)
+                    _arguments '--rollback[restore the previous revision]'
                     ;;
             esac
             ;;
