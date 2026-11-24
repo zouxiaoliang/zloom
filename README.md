@@ -418,11 +418,13 @@ make the command exit 1 — `zloom doctor` explains them. `--outdated` keeps
 its one-line-per-plugin format. Legacy setups without a manifest keep the
 old behaviour of dumping the generated `init.zsh`.
 
-`--outdated` compares every clone with the remote ref it is pinned to and
-prints one line per plugin: `ok`, `outdated` (with the local and remote
-short SHAs), `missing` (not cloned yet — run `zloom sync`), `pinned` (a
-commit SHA, by definition exact) or `?ref` (the ref no longer exists
-upstream). It needs the network and pulls nothing.
+`--outdated` compares every clone with the remote ref it is pinned to and prints one
+line per unique clone: `ok`, `outdated` (with the local and remote short SHAs),
+`missing` (not cloned yet -- run `zloom sync`), `pinned` (a commit SHA, by definition
+exact) or `?ref` (the ref no longer exists upstream). Entries that share one clone
+(several oh-my-zsh plugin lines, one clone) are judged once and the line notes the
+entry count -- `robbyrussell/oh-my-zsh  c014070 -> 6c31a91  (17 entries)`. It needs
+the network and pulls nothing.
 
 #### Bulk load plugins
 

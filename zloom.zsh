@@ -2008,11 +2008,21 @@ zloom-clean() {
 # `zloom list --outdated': compare every clone's HEAD with the remote ref
 # it is pinned to — branches via refs/heads, pins via refs/tags, @HEAD via
 # HEAD; commit-sha pins are reported as pinned. Requires network; nothing
-# is pulled.
+# is pulled. Manifest entries sharing one clone (17 oh-my-zsh plugin lines,
+# one clone) are judged ONCE: one remote query and one verdict line per
+# unique clone, noting how many entries share it.
 -zloom-list-outdated() {
     [[ -f "${ZLOOM_PLUGINS}" ]] || { -zlpute "outdated: manifest not found"; return 1; }
-    local line repo branch ref dir url lsha rsha seen=0
-    local -a words
+    # Every local lives at function top: a `local' re-declared inside a
+    # loop makes zsh 5.9 print `name=<current value>' on stdout.
+    local line repo branch ref dir url lsha rsha spec seen=0 row _r
+    local -a words uniq=() _refs
+    local _us=$'\x1f' i found=0 uc share=""
+
+    # Pass 1 — unique clones in first-appearance order, keeping the split
+    # repo (never re-derived from the spec: `git@…' and `user@host' URLs
+    # contain an @ of their own): rows are
+    # "dir<US>display-spec<US>branch<US>repo<US>entry-count".
     while IFS= read -r line; do
         -zloom-manifest-words "${line}"
         words=("${reply[@]}")
@@ -2028,12 +2038,40 @@ zloom-clean() {
         (( seen++ ))
         -zloom-set-clone-dir "${repo}" "${branch}"
         dir="${REPLY}"
-        if [[ ! -d "${dir}" ]]; then
-            printf '%-9s%s\n' missing "${words[2]} (run zloom sync)"
+        found=0
+        for (( i = 1; i <= ${#uniq}; i++ )); do
+            if [[ "${uniq[i]%%${_us}*}" == "${dir}" ]]; then
+                uc="${uniq[i]##*${_us}}"
+                uniq[i]="${uniq[i]%${_us}*}${_us}$(( uc + 1 ))"
+                found=1
+                break
+            fi
+        done
+        (( found )) || uniq+=("${dir}${_us}${words[2]}${_us}${branch}${_us}${repo}${_us}1")
+    done < "${ZLOOM_PLUGINS}"
+    (( seen )) || { -zlpute "outdated: no load/defer entries"; return 0; }
+
+    # Pass 2 — one remote judgement per unique clone.
+    for row in "${uniq[@]}"; do
+        dir="${row%%${_us}*}"
+        row="${row#*${_us}}"
+        spec="${row%%${_us}*}"
+        row="${row#*${_us}}"
+        branch="${row%%${_us}*}"
+        row="${row#*${_us}}"
+        repo="${row%%${_us}*}"
+        uc="${row##*${_us}}"
+        share=""
+        (( uc > 1 )) && share=" (${uc} entries)"
+        # A failed clone leaves an empty directory behind (mkdir runs
+        # before git clone); only a directory with a .git counts as
+        # cloned, everything else is "missing".
+        if [[ ! -d "${dir}/.git" ]]; then
+            printf '%-9s%s%s\n' missing "${spec} (run zloom sync)" "${share}"
             continue
         fi
         if [[ "${branch}" =~ '^[0-9a-f]{7,40}$' ]]; then
-            printf '%-9s%s\n' pinned "${words[2]} (commit ${branch})"
+            printf '%-9s%s%s\n' pinned "${spec} (commit ${branch})" "${share}"
             continue
         fi
         lsha="$(git -C "${dir}" rev-parse HEAD 2>/dev/null)"
@@ -2044,10 +2082,9 @@ zloom-clean() {
             # An annotated tag's ref points at a tag object, not a commit;
             # the peeled `^{}' ref does. Ask for both and let the peeled
             # one win when the remote lists it.
-            local -a _refs=("${(@f)$(git ls-remote "${url}" "refs/heads/${branch}" \
+            _refs=("${(@f)$(git ls-remote "${url}" "refs/heads/${branch}" \
                 "refs/tags/${branch}" "refs/tags/${branch}^{}" 2>/dev/null)}")
             rsha=""
-            local _r
             for _r in "${_refs[@]}"; do
                 [[ -n "${_r}" ]] || continue
                 rsha="${_r%%$'\t'*}"
@@ -2056,14 +2093,13 @@ zloom-clean() {
         fi
         rsha="${rsha%%$'\t'*}"
         if [[ -z "${rsha}" ]]; then
-            printf '%-9s%s\n' '?ref' "${words[2]} (${branch} not found upstream)"
+            printf '%-9s%s%s\n' '?ref' "${spec} (${branch} not found upstream)" "${share}"
         elif [[ "${lsha}" != "${rsha}" ]]; then
-            printf '%-9s%s\n' outdated "${words[2]}  ${lsha:0:7} -> ${rsha:0:7}"
+            printf '%-9s%s%s\n' outdated "${spec}  ${lsha:0:7} -> ${rsha:0:7}" "${share}"
         else
-            printf '%-9s%s\n' ok "${words[2]}"
+            printf '%-9s%s%s\n' ok "${spec}" "${share}"
         fi
-    done < "${ZLOOM_PLUGINS}"
-    (( seen )) || -zlpute "outdated: no load/defer entries"
+    done
     return 0
 }
 

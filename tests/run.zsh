@@ -326,6 +326,7 @@ print -r -- "load file://${T}/bare.git@v1" >! "${T}/xdg/zloom/plugins.zsh"
 zl 'true' >/dev/null 2>&1
 out="$(zl 'zloom list --outdated')"
 grep -q '^ok ' <<< "${out}" && ok "lightweight tag in sync reads ok" || no "lightweight tag in sync reads ok" "" "${out}"
+grep -q '_r=' <<< "${out}" && no "no loop-local reprint junk in outdated output" || ok "no loop-local reprint junk in outdated output"
 # Move the tag upstream, then verify both detection and the follow.
 gitpublish v2 "${T}/bare"
 git -C "${T}/bare.work" tag -f v1 >/dev/null
@@ -341,6 +342,25 @@ git -C "${T}/bare.work" -c user.email=t@t -c user.name=t tag -af v1 -m annotated
 git -C "${T}/bare.work" push -qf "${T}/bare.git" v1
 out="$(zl 'zloom list --outdated')"
 grep -q '^ok ' <<< "${out}" && ok "annotated tag in sync reads ok (peeled ref)" || no "annotated tag in sync reads ok (peeled ref)" "" "${out}"
+rm -rf "${T}"
+
+print "19b. shared clones are judged once; failed clones read as missing"
+sandbox
+gitfix "${T}/bare"
+cat >! "${T}/xdg/zloom/plugins.zsh" <<MAN
+load file://${T}/bare.git plugins/a
+load file://${T}/bare.git plugins/b
+load file://${T}/bare.git plugins/c
+load file://${T}/bare.git@HEAD
+load file://${T}/nobare.git
+MAN
+zl 'true' >/dev/null 2>&1     # bootstrap clones bare.git (branch + @HEAD)
+out="$(zl 'zloom list --outdated' 2>&1)"
+n=$(grep -c '^ok ' <<< "${out}")
+check "one verdict per unique clone (bare.git + @HEAD + failed)" "2" "${n}"
+grep -q '(3 entries)' <<< "${out}" && ok "shared clone notes its entry count" || no "shared clone notes its entry count" "" "${out}"
+grep -q '^missing' <<< "${out}" && ok "a failed clone reads as missing" || no "a failed clone reads as missing" "" "${out}"
+grep -q '_r=' <<< "${out}" && no "no reprint junk" || ok "no reprint junk"
 rm -rf "${T}"
 
 print "20. clean removes stale snippet caches"
