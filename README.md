@@ -43,7 +43,7 @@ whenever you change the plugin set in a `.zshrc`-managed setup.
 
 Clone the zloom repository
 
-    git clone https://github.com/nervlab-cn/zloom.git "${HOME}/.zloom"
+    git clone https://github.com/zouxiaoliang/zloom.git "${HOME}/.zloom"
 
 Edit your .zshrc file to load zloom
 
