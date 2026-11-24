@@ -399,13 +399,24 @@ manifest on the next start.
 #### List plugins
 
     zloom list
+    zloom list --plain
     zloom list --outdated
 
-With a manifest present, prints every entry with its kind — `load`
-(synchronous), `defer` (turbo, right after the first prompt), `snippet`
-(single file), `env`, `eval`, `alias` or `func` — in load order; unknown
-lines are flagged with `?`. Legacy setups without a manifest keep the old
-behaviour of dumping the generated `init.zsh`.
+With a manifest present, prints the manifest grouped the way the generated
+`init.zsh` executes it — Plugins (load), Turbo (defer), Snippets, Eval,
+Environment, Aliases, Functions — each section with its entry count and a
+`total` line at the end. Every entry carries its manifest line number in
+brackets, so it can be found again in an editor:
+
+    Plugins (3)
+      robbyrussell/oh-my-zsh oh-my-zsh.sh  [7]
+      ...
+
+`--plain` forces the unadorned form (pipes and redirections get it
+automatically). Lines zloom does not understand are reported on stderr and
+make the command exit 1 — `zloom doctor` explains them. `--outdated` keeps
+its one-line-per-plugin format. Legacy setups without a manifest keep the
+old behaviour of dumping the generated `init.zsh`.
 
 `--outdated` compares every clone with the remote ref it is pinned to and
 prints one line per plugin: `ok`, `outdated` (with the local and remote

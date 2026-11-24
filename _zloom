@@ -98,7 +98,8 @@ _zloom() {
                     _arguments '--force[delete unreferenced clones]'
                     ;;
                 list)
-                    _arguments '--outdated[compare clones with their remote refs]'
+                    _arguments '--outdated[compare clones with their remote refs]' \
+                        '--plain[unadorned output, no colours]'
                     ;;
                 selfupdate)
                     _arguments '--rollback[restore the previous revision]'

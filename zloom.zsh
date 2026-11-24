@@ -2067,12 +2067,18 @@ zloom-clean() {
     return 0
 }
 
-# `zloom list': show the manifest entries with their kind — `load'
-# (synchronous), `defer' (turbo, after the first prompt), `snippet'
-# (single file), `env', `eval', `alias' and `func' — in load order.
+# `zloom list': show the manifest grouped the way the generated init.zsh
+# executes it — Plugins (load), Turbo (defer), Snippets, Eval,
+# Environment, Aliases, Functions — each section with its entry count,
+# a total line at the end, and the manifest line number of every entry
+# so it can be found again in an editor. Unknown lines are reported on
+# stderr and make the command exit 1 (doctor's lint explains them).
+# `--plain' forces the unadorned form; pipes and redirections get it
+# automatically. `--outdated' keeps its one-line-per-plugin format.
 # Legacy setups without a manifest keep the old behaviour: dump the
 # generated init script.
 zloom-list() {
+    local plain=""
     if [[ "${1}" == "--outdated" || "${1}" == "-o" ]]; then
         shift
         if (( $# > 0 )); then
@@ -2082,6 +2088,12 @@ zloom-list() {
         -zloom-list-outdated
         return $?
     fi
+    if [[ "${1}" == "--plain" || "${1}" == "-p" ]]; then
+        plain=1
+        shift
+    fi
+    (( $# )) && { -zlpute '`list` takes no parameters'; return 1; }
+
     if [[ ! -f "${ZLOOM_PLUGINS}" ]]; then
         if [[ -f "${ZLOOM_INIT}" ]]; then
             cat "${ZLOOM_INIT}"
@@ -2091,45 +2103,91 @@ zloom-list() {
         return 1
     fi
 
-    local line
-    local -a words
+    # Collect first, render second: section order must match the init.zsh
+    # execution order, not the order lines happen to sit in the file.
+    # One flat rows array; each row is "<lno><US><kind><US><body>" with
+    # the ASCII unit separator, which no manifest line can contain.
+    # (Dynamic array names like rows_${kind}+=(...) do not work in zsh —
+    # the flag error "unknown file attribute" — so one array it is.)
+    local line kind body lno=0 row
+    local _us=$'\x1f'
+    local -a words rows=()
     while IFS= read -r line; do
+        (( lno++ ))
         -zloom-manifest-words "${line}"
         words=("${reply[@]}")
         (( ${#words} )) || continue
-        case "${words[1]}" in
-            load|defer|snippet)
-                printf '%-9s%s\n' "${words[1]}" "${(j: :)words[2,-1]}"
-                ;;
-            env)
-                printf '%-9s%s\n' env "${words[2]}"
-                ;;
-            eval)
-                printf '%-9s%s\n' eval "${(j: :)words[2,-1]}"
-                ;;
+        kind="${words[1]}"
+        # Unknown kinds get collected too: silently dropping a line is
+        # exactly how the "env X=1 snippet ..." bug stayed invisible.
+        [[ "${kind}" == (load|defer|snippet|eval|env|alias|func) ]] || kind="unknown"
+        body="${(j: :)words[2,-1]}"
+        case "${kind}" in
+            env)   body="${words[2]}" ;;
             alias)
-                if (( ${#words} == 2 )); then
-                    # hand-written `alias NAME=COMMAND' line
-                    printf '%-9s%s\n' alias "${words[2]}"
-                else
-                    printf '%-9s%s\n' alias "${words[2]}=${(j: :)words[3,-1]}"
-                fi
+                (( ${#words} == 2 )) || body="${words[2]}=${(j: :)words[3,-1]}"
                 ;;
             func)
-                if (( ${#words} == 2 )); then
-                    # hand-written `func NAME=BODY' line
-                    printf '%-9s%s\n' func "${words[2]}"
-                else
-                    printf '%-9s%s\n' func "${words[2]}() { ${(j: :)words[3,-1]} }"
-                fi
-                ;;
-            *)
-                # Unknown entries are flagged so they get noticed (the
-                # replay reports them as ignored as well).
-                printf '%-9s%s\n' '?' "${(j: :)words}"
+                (( ${#words} == 2 )) || body="${words[2]}() { ${(j: :)words[3,-1]} }"
                 ;;
         esac
+        rows+=("${lno}${_us}${kind}${_us}${body}")
     done < "${ZLOOM_PLUGINS}"
+
+    # Render. Colours only on a terminal; section order mirrors init.zsh.
+    local _c_head='' _c_dim='' _c_r=''
+    if [[ -z "${plain}" && -t 1 ]]; then
+        _c_head=$'\e[1;36m'
+        _c_dim=$'\e[2m'
+        _c_r=$'\e[0m'
+    fi
+    local -a out=() sect
+    local title first=1
+    integer n total=0
+    for kind in load defer snippet eval env alias func unknown; do
+        sect=("${(@M)rows:#*${_us}${kind}${_us}*}")
+        (( n = ${#sect} ))
+        [[ "${kind}" == unknown ]] || (( total += n ))
+        (( n )) || continue
+        case "${kind}" in
+            load)    title="Plugins" ;;
+            defer)   title="Turbo" ;;
+            snippet) title="Snippets" ;;
+            eval)    title="Eval" ;;
+            env)     title="Environment" ;;
+            alias)   title="Aliases" ;;
+            func)    title="Functions" ;;
+            unknown) title="Unknown (ignored)" ;;
+        esac
+        (( first )) || out+=("")
+        first=0
+        out+=("${_c_head}${title}${_c_r} ${_c_dim}(${n})${_c_r}")
+        # Inline the field split: no named temporaries. (A `local' re-run
+        # per loop iteration would print `name=value' — zsh 5.9 reprints
+        # a parameter when `local' re-declares it without an assignment.)
+        for row in "${sect[@]}"; do
+            out+=("  ${row##*${_us}} ${_c_dim}[${row%%${_us}*}]${_c_r}")
+        done
+    done
+
+    (( first )) || out+=("")
+    out+=("${_c_dim}total: ${total} entries${_c_r}")
+    if [[ -z "${plain}" && -t 1 ]]; then
+        out+=("${_c_dim}  load      cloned plugins, sourced at startup${_c_r}")
+        out+=("${_c_dim}  defer     same, after the first prompt (turbo)${_c_r}")
+        out+=("${_c_dim}  snippet   single config file, local or cached remote${_c_r}")
+        out+=("${_c_dim}  eval      runs \$(command) before the plugins${_c_r}")
+        out+=("${_c_dim}  env       exported before the plugins${_c_r}")
+        out+=("${_c_dim}  alias     defined after the plugins, wins over them${_c_r}")
+        out+=("${_c_dim}  func      defined after the plugins, wins over them${_c_r}")
+    fi
+    (( ${#out} )) && print -rl -- "${out[@]}"
+
+    if [[ "${kind}" == unknown && -n "${sect}" ]]; then
+        -zlpute "list: ${#sect} manifest line(s) zloom does not understand (see \`zloom doctor')"
+        return 1
+    fi
+    return 0
 }
 
 zloom-loadall() {
