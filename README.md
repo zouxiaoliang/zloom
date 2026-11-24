@@ -26,12 +26,18 @@ manifest with `zloom add`, `zloom del`, `zloom snippet`, `zloom env` and
 - **Byte-compiled everywhere** — the init script, every sourced plugin script
   and the `compinit` dump are cached as `.zwc` bytecode and invalidated
   automatically when their source changes.
-- **Housekeeping** — `zloom list` shows what is loaded and how; `zloom clean`
-  removes clones the manifest no longer references.
+- **Housekeeping** — `zloom sync` reconciles clones and `init.zsh` with the
+  manifest after a hand edit; `zloom list --outdated` shows what is behind
+  its remote; `zloom clean` removes what the manifest no longer references.
+- **Version pins** — `owner/repo@tag`, `@branch`, `@commit` or `@HEAD`, which
+  follows the remote's default branch even across a rename.
+- **Diagnosable** — `zloom doctor` reports ignored manifest lines, stale
+  init scripts, missing clones and a per-section startup breakdown.
 
 The flip side of the static approach: updates are manual. Run `zloom update`
-to pull new plugin versions (it resets the init script afterwards) and
-`zloom reset` whenever you change the plugin set in a `.zshrc`-managed setup.
+to pull new plugin versions (it resets the init script afterwards) or
+`zloom sync --update` to pull and reconcile in one go, and `zloom reset`
+whenever you change the plugin set in a `.zshrc`-managed setup.
 
 ## Installation
 
@@ -237,6 +243,12 @@ branch (one `git ls-remote`) and records it as a pin unless it is `master` —
 clone directories embed the branch, so the recorded pin keeps rebuilds
 deterministic and offline-safe on repositories whose default is `main`.
 
+`@HEAD` follows the remote's default branch without naming it. It is what
+`zloom add` records when the remote cannot be reached, and the right choice
+for a plugin whose default branch may be renamed: `zloom update` asks the
+remote which commit its `HEAD` names and checks that out, so the clone
+follows a rename, where a plain `git pull` would keep tracking the old name.
+
 #### Remove a plugin
 
     zloom del <plugin>
@@ -253,13 +265,16 @@ and function entries, however, are also removed from the running shell
 
     zloom sync
     zloom sync --clean
+    zloom sync --update
 
 `zloom sync` reconciles everything with the manifest in one command —
 fisher's `update` model: hand-edit `plugins.zsh`, run `zloom sync`. It
 clones every `load`/`defer` repository that is missing on disk
 (concurrently), regenerates `init.zsh` from the manifest, and reports
 clones that are no longer referenced (with `--clean` it deletes them, like
-`zloom clean --force`). No `zloom reset` plus a new shell needed.
+`zloom clean --force`). No `zloom reset` plus a new shell needed. With
+`--update` it also pulls every existing clone first, so reconcile and fetch
+are one command.
 
 #### Lifecycle hooks
 
@@ -271,7 +286,9 @@ clones that are no longer referenced (with `--clean` it deletes them, like
 Functions with these names are invoked (with the command's argument) after
 `zloom add` / `del` / `sync` / `update` finish, when defined — zsh has no
 event system, so zloom calls convention-named functions instead of fisher's
-`fisher_*` events. `functions/` is the natural place to define them.
+`fisher_*` events. `functions/` is the natural place to define them; a hook
+file named after the hook (`functions/_zloom_post_sync.zsh`) is sourced on
+demand, so it also runs in a shell that has not loaded `init.zsh` yet.
 
 #### Set a persistent environment variable
 
@@ -371,21 +388,30 @@ the manifest is created.
 
 `zloom clean` compares the cloned plugin directories under `${ZLOOM_DIR}` with
 the manifest and reports every clone that is no longer referenced by a
-`load`/`defer` entry (dry run). `zloom clean --force` deletes them and the
-now-empty location directories; the snippets cache, the zloom installation
-itself and everything still listed are never touched. If a stale `init.zsh`
-still sources a removed plugin, it is reset automatically and rebuilt from
-the manifest on the next start.
+`load`/`defer` entry (dry run). Stale remote-snippet caches go on the same
+list: a cached file whose recorded origin URL is no longer a `snippet`
+entry. `zloom clean --force` deletes them and the now-empty location
+directories; snippet caches still listed, the zloom installation itself and
+everything still referenced are never touched. If a stale `init.zsh` still
+sources a removed plugin, it is reset automatically and rebuilt from the
+manifest on the next start.
 
 #### List plugins
 
     zloom list
+    zloom list --outdated
 
 With a manifest present, prints every entry with its kind — `load`
 (synchronous), `defer` (turbo, right after the first prompt), `snippet`
-(single file), `env` or `alias` — in load order; unknown lines are flagged with
-`?`. Legacy setups without a manifest keep the old behaviour of dumping
-the generated `init.zsh`.
+(single file), `env`, `eval`, `alias` or `func` — in load order; unknown
+lines are flagged with `?`. Legacy setups without a manifest keep the old
+behaviour of dumping the generated `init.zsh`.
+
+`--outdated` compares every clone with the remote ref it is pinned to and
+prints one line per plugin: `ok`, `outdated` (with the local and remote
+short SHAs), `missing` (not cloned yet — run `zloom sync`), `pinned` (a
+commit SHA, by definition exact) or `?ref` (the ref no longer exists
+upstream). It needs the network and pulls nothing.
 
 #### Bulk load plugins
 
@@ -409,14 +435,40 @@ This will not remove the plugins physically from disk.
     zloom saved
 Returns 0 if an init script exists.
 
+#### Diagnose the setup
+    zloom doctor
+
+Checks the setup and exits non-zero when something needs attention:
+
+- manifest lines zloom would silently ignore — an unknown entry kind, an
+  entry missing its argument, or extra words on an `env`/`snippet` line
+  (those take exactly one value, so a second one is dropped);
+- `init.zsh` missing, or older than the manifest (`zloom sync` rebuilds it);
+- plugin clones the manifest lists but that are not on disk;
+- completion commands declared in `completions/` that are not registered.
+
+It also times one interactive shell start, and breaks the generated
+`init.zsh` down by section, heaviest first. The timing runs against a
+throwaway copy of `init.zsh`: the real file carries no timing code, so
+`doctor` itself costs the steady-state startup nothing. Deferred plugins are
+sourced after the first prompt and do not appear in the startup figures.
+
 #### Update all plugins and reset
     zloom update
 
-Pulls updates on every plugin repository (concurrently; detached-HEAD
-clones from `@tag`/`@commit` pins are skipped) and removes the init script.
+Updates every plugin repository concurrently and removes the init script.
+Branch checkouts are pulled; `@tag` pins are re-fetched and checked out (so
+a moved tag is followed) and `@HEAD` pins follow the remote's default branch;
+`@commit` pins stay exactly where they are. Repositories that fail are
+reported and make the command exit non-zero.
 
 #### Update zloom
     zloom selfupdate
+    zloom selfupdate --rollback
+
+Pulls the zloom repository and removes the init script. The revision it
+replaced is remembered, so `--rollback` restores it (once, until the next
+update). `zloom version` prints the revision currently running.
 
 #### Clone a repository without loading it
     zloom clone <repo> [branch]
@@ -526,10 +578,16 @@ Here is a partial example how to work with prezto
 
     zsh tests/run.zsh
 
-Offline regression suite: every test runs in its own sandbox (temp
-`HOME`/`XDG_CONFIG_HOME`/`ZLOOM_DIR`) and remote plugins are simulated with
-local bare git repositories reached through `file://` URLs. The exit status
-is 0 only when every check passes.
+Offline regression suite, 119 checks: every test runs in its own sandbox
+(temp `HOME`/`XDG_CONFIG_HOME`/`ZLOOM_DIR`) and remote plugins are simulated
+with local bare git repositories reached through `file://` URLs. The exit
+status is 0 only when every check passes.
+
+Among the checks is the one that keeps zloom fast: regenerating `init.zsh`
+from the same manifest must be byte-identical, and the result must contain
+no command-side code. `doctor`, `sync`, `outdated` and the hooks all live in
+zloom's commands, never on the startup path — starting a shell is still just
+sourcing a static, byte-compiled script and arming the one-shot turbo hook.
 
 ## History
 
