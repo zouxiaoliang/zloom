@@ -434,22 +434,30 @@ zloom-reset() {
 # exact content and are skipped. Failures surface after all jobs finish;
 # the exit status reflects them. Nothing here runs at shell startup.
 -zloom-pull-all() {
-    setopt localoptions extended_glob
+    # Everything parallel runs inside ONE foreground subshell: a subshell
+    # has no job monitoring, so the inner background jobs are silent —
+    # spawned from the interactive shell directly, every `&' prints a
+    # `[N] pid' / `[N] done' notification pair. The subshell exit status
+    # carries the failure summary.
+    local rc=0
+    (
+        setopt localoptions extended_glob
 
-    local repo pid ref dir line rc=0
-    local -a words jobs=()
+        local repo pid ref dir line
+        local -a words jobs=()
+        integer _rc=0
 
-    for repo in "${ZLOOM_DIR}"/(^(.git|snippets))/*(N); do
-        -zlpute "Updating '${repo}' ..."
-        ( cd "${repo}" \
-            && { git symbolic-ref -q HEAD >/dev/null || exit 0; } \
-            && git pull --quiet \
-            && git submodule update --init --recursive --quiet ) &
-        jobs+=($!)
-    done
+        for repo in "${ZLOOM_DIR}"/(^(.git|snippets))/*(N); do
+            -zlpute "Updating '${repo}' ..."
+            ( cd "${repo}" \
+                && { git symbolic-ref -q HEAD >/dev/null || exit 0; } \
+                && git pull --quiet \
+                && git submodule update --init --recursive --quiet ) &
+            jobs+=($!)
+        done
 
-    if [[ -f "${ZLOOM_PLUGINS}" ]]; then
-        while IFS= read -r line; do
+        if [[ -f "${ZLOOM_PLUGINS}" ]]; then
+            while IFS= read -r line; do
             -zloom-manifest-words "${line}"
             words=("${reply[@]}")
             (( ${#words} >= 2 )) || continue
@@ -487,12 +495,15 @@ zloom-reset() {
                     && git submodule update --init --recursive --quiet ) &
             fi
             jobs+=($!)
-        done < "${ZLOOM_PLUGINS}"
-    fi
+            done < "${ZLOOM_PLUGINS}"
+        fi
 
-    for pid in "${jobs[@]}"; do
-        wait "${pid}" || rc=1
-    done
+        for pid in "${jobs[@]}"; do
+            wait "${pid}" || _rc=1
+        done
+        return ${_rc}
+    )
+    rc=$?
     return ${rc}
 }
 
@@ -1830,27 +1841,33 @@ zloom-sync() {
     # every directory present and records entries in manifest order.
     # Repositories that fail to clone surface as load errors in the
     # rebuild, keeping the reporting in one place.
-    local line repo branch dir
-    local -a words jobs=()
-    while IFS= read -r line; do
-        -zloom-manifest-words "${line}"
-        words=("${reply[@]}")
-        (( ${#words} >= 2 )) || continue
-        [[ "${words[1]}" == (load|defer) ]] || continue
-        repo="${words[2]}"
-        branch="${words[4]:-master}"
-        -zloom-split-ref "${repo}"
-        repo="${REPLY}"
-        [[ -n "${REPLY_REF}" ]] && branch="${REPLY_REF}"
-        [[ "${repo}" == /* || "${repo}" == .* ]] && continue
-        -zloom-set-clone-dir "${repo}" "${branch}"
-        dir="${REPLY}"
-        [[ -d "${dir}" ]] && continue
-        -zlpute "sync: cloning ${repo}@${branch} ..."
-        ( zloom-clone "${repo}" "${branch}" ) &
-        jobs+=($!)
-    done < "${ZLOOM_PLUGINS}"
-    (( ${#jobs} )) && wait "${jobs[@]}"
+    # The parallel prefetch runs inside ONE foreground subshell: a
+    # subshell has no job monitoring, so the inner background jobs are
+    # silent — spawned from the interactive shell directly, every `&'
+    # prints a `[N] pid' / `[N] done' notification pair.
+    (
+        local line repo branch dir
+        local -a words jobs=()
+        while IFS= read -r line; do
+            -zloom-manifest-words "${line}"
+            words=("${reply[@]}")
+            (( ${#words} >= 2 )) || continue
+            [[ "${words[1]}" == (load|defer) ]] || continue
+            repo="${words[2]}"
+            branch="${words[4]:-master}"
+            -zloom-split-ref "${repo}"
+            repo="${REPLY}"
+            [[ -n "${REPLY_REF}" ]] && branch="${REPLY_REF}"
+            [[ "${repo}" == /* || "${repo}" == .* ]] && continue
+            -zloom-set-clone-dir "${repo}" "${branch}"
+            dir="${REPLY}"
+            [[ -d "${dir}" ]] && continue
+            -zlpute "sync: cloning ${repo}@${branch} ..."
+            ( zloom-clone "${repo}" "${branch}" ) &
+            jobs+=($!)
+        done < "${ZLOOM_PLUGINS}"
+        (( ${#jobs} )) && wait "${jobs[@]}"
+    )
 
     # --update also pulls existing clones (fisher's update = reconcile
     # + fetch in one command).
