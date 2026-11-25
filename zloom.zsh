@@ -1372,7 +1372,20 @@ zloom-defer() {
     local -a words
     # A functions-only setup has no manifest file yet; nothing to replay.
     [[ -f "${ZLOOM_PLUGINS}" ]] || return 0
-    for phase in env eval plugins aliases functions; do
+    # Optional phase filter: with arguments, only the named phases run,
+    # always in the canonical order. The live bootstrap replays env+eval
+    # before conf.d (so user config sees the eval-provided PATH, exactly
+    # like init.zsh) and the remaining phases after it.
+    local -a all=(env eval plugins aliases functions) wanted=()
+    if (( $# )); then
+        local -a asked=("$@")
+        for phase in "${all[@]}"; do
+            [[ " ${asked[*]} " == *" ${phase} "* ]] && wanted+=("${phase}")
+        done
+    else
+        wanted=("${all[@]}")
+    fi
+    for phase in "${wanted[@]}"; do
         while IFS= read -r line; do
             -zloom-manifest-words "${line}"
             words=("${reply[@]}")
@@ -1422,14 +1435,20 @@ zloom-defer() {
 
         # The bootstrap shell never sources the freshly generated
         # init.zsh, so mirror its order here to make the first shell
-        # fully functional: conf.d + config.zsh ahead of the plugins
-        # (PATH ready), function files and themes after them.
+        # fully functional: manifest env + eval entries first (PATH
+        # from `brew shellenv' etc.), then conf.d + config.zsh, then
+        # the plugins, aliases and manifest functions. Replaying all
+        # phases before user config left conf.d without the
+        # eval-provided PATH: drop-ins like `eval "$(fzf --zsh)"'
+        # failed with `command not found' in the first shell only.
+        -zloom-replay-manifest env eval
+
         for _zloom_cf in "${_zloom_cfg}"/conf.d/*.zsh(N); do
             source "${_zloom_cf}"
         done
         [[ -f "${_zloom_cfg}/config.zsh" ]] && source "${_zloom_cfg}/config.zsh"
 
-        -zloom-replay-manifest
+        -zloom-replay-manifest plugins aliases functions
         zloom-save
 
         for _zloom_ff in "${_zloom_cfg}"/functions/*.zsh(N); do

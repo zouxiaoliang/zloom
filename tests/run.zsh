@@ -641,6 +641,32 @@ grep -qE 'EPOCHREALTIME|zmodload|doctor|outdated|-zloom-hook|zloom (sync|update)
 zsh -n "${T}/data/init.zsh" 2>/dev/null && ok "generated init.zsh parses standalone" || no "generated init.zsh parses standalone"
 rm -rf "${T}"
 
+print "29. bootstrap order: manifest eval precedes conf.d drop-ins"
+sandbox
+mkdir -p "${T}/xdg/zloom/conf.d" "${T}/bin"
+# Fake `brew shellenv': prints the shell code that puts ${T}/bin on PATH.
+# $PATH must stay OUTSIDE the single quotes, or the emitted export would
+# pin the literal string `$PATH' into PATH.
+printf '#!/bin/zsh\nprint -r -- "export PATH=%s:$PATH"\n' "'${T}/bin'" >! "${T}/bin/setuptool"
+chmod +x "${T}/bin/setuptool"
+printf '#!/bin/zsh\nprint -r -- "dep-up:$1"\n' >! "${T}/bin/dep"
+chmod +x "${T}/bin/dep"
+# fzf-style drop-in: invokes a command that only exists once the
+# manifest's eval entry has set up the PATH.
+print -r -- "eval ${T}/bin/setuptool" >! "${T}/xdg/zloom/plugins.zsh"
+print -r -- 'print -r -- "cf: dep=$(dep ping)"' >! "${T}/xdg/zloom/conf.d/10-dep.zsh"
+out=$(PATH=/usr/bin:/bin:/usr/sbin:/sbin zl 'true')
+print -r -- "${out}" | grep -q 'command not found' \
+    && no "bootstrap shell sources conf.d after manifest eval" \
+    || ok "bootstrap shell sources conf.d after manifest eval"
+print -r -- "${out}" | grep -q 'cf: dep=dep-up:ping' \
+    && ok "conf.d sees the eval-provided PATH in the bootstrap shell" \
+    || no "conf.d sees the eval-provided PATH in the bootstrap shell"
+zl 'echo "later: dep=$(dep ping)"' | grep -q 'later: dep=dep-up:ping' \
+    && ok "init.zsh order untouched (eval before conf.d)" \
+    || no "init.zsh order untouched (eval before conf.d)"
+rm -rf "${T}"
+
 print
 print "passed: ${passed}  failed: ${failed}"
 (( failed == 0 )) || exit 1
