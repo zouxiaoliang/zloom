@@ -792,13 +792,25 @@ zloom-save() {
 }
 
 zloom-apply() {
+    local -a _ci_flags
     fpath=(${(q)ZLOOM_COMPLETIONS[@]} ${(q)${ZLOOM_PLUGINS:h}}/completions ${fpath})
 
     if [[ ${ZLOOM_AUTOLOAD_COMPINIT} == 1 ]]; then
         -zlpute "Initializing completions ..."
 
+        # Build argv instead of expanding ${ZLOOM_COMPINIT_FLAGS}: zsh
+        # does not word-split an unquoted scalar, so compinit used to get
+        # the single word `-d <dump>' -- none of its options -- and fell
+        # back to ${ZDOTDIR:-$HOME}/.zcompdump. ZLOOM_CUSTOM_COMPDUMP was
+        # then never written by the bootstrap shell and the next shell
+        # (whose init.zsh carries the flags as text) rescanned every
+        # completion file from scratch.
+        _ci_flags=(${=${ZLOOM_COMPINIT_FLAGS#"${ZLOOM_COMPINIT_DIR_FLAG}"}})
+        if [[ -n "${ZLOOM_CUSTOM_COMPDUMP}" ]]; then
+            _ci_flags=(-d "${ZLOOM_CUSTOM_COMPDUMP}" "${_ci_flags[@]}")
+        fi
         autoload -Uz compinit && \
-            compinit $ZLOOM_COMPINIT_FLAGS
+            compinit "${_ci_flags[@]}"
     fi
 }
 

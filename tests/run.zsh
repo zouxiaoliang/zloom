@@ -667,6 +667,34 @@ zl 'echo "later: dep=$(dep ping)"' | grep -q 'later: dep=dep-up:ping' \
     || no "init.zsh order untouched (eval before conf.d)"
 rm -rf "${T}"
 
+print "30. bootstrap honors ZLOOM_CUSTOM_COMPDUMP"
+sandbox
+print -r -- 'env X=1' >! "${T}/xdg/zloom/plugins.zsh"
+_dump="${T}/home/.zcompdump-user"
+ZLOOM_CUSTOM_COMPDUMP="${_dump}" zl 'true' >/dev/null 2>&1     # bootstrap shell
+[[ -s "${_dump}" ]] && ok "bootstrap writes the custom completion dump" \
+    || no "bootstrap writes the custom completion dump"
+[[ ! -e "${T}/.zcompdump" ]] && ok "bootstrap does not fall back to the default dump" \
+    || no "bootstrap does not fall back to the default dump"
+# The next shell (init.zsh carries the flags as text) must reuse that dump
+# instead of rescanning every completion file.
+zmodload zsh/stat
+zstat -A _st +inode "${_dump}" 2>/dev/null && _ino="${_st[1]}" || _ino=missing
+ZLOOM_CUSTOM_COMPDUMP="${_dump}" zl 'true' >/dev/null 2>&1
+zstat -A _st +inode "${_dump}" 2>/dev/null && [[ "${_st[1]}" == "${_ino}" ]] \
+    && ok "next shell reuses the dump (no second full compinit)" \
+    || no "next shell reuses the dump (no second full compinit)"
+rm -rf "${T}"
+# Same word-splitting bug for user flags: `-D' must reach compinit as an
+# option, not as a trailing-space word it does not recognise.
+sandbox
+print -r -- 'env X=1' >! "${T}/xdg/zloom/plugins.zsh"
+ZLOOM_CUSTOM_COMPDUMP="${T}/home/.zcompdump-user" ZLOOM_COMPINIT_FLAGS=-D zl 'true' >/dev/null 2>&1
+[[ ! -e "${T}/home/.zcompdump-user" && ! -e "${T}/.zcompdump" ]] \
+    && ok "bootstrap passes ZLOOM_COMPINIT_FLAGS through (-D writes no dump)" \
+    || no "bootstrap passes ZLOOM_COMPINIT_FLAGS through (-D writes no dump)"
+rm -rf "${T}"
+
 print
 print "passed: ${passed}  failed: ${failed}"
 (( failed == 0 )) || exit 1
