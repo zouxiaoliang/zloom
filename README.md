@@ -523,7 +523,7 @@ All variables are read when `zloom.zsh` is sourced, so set them before the
 ## Notes
 Be aware that `zloom` tries to handle [`compinit`][compinit] for you to allow for the fastest possible initialization times. However, this functionality will be disabled if you've already called `compinit` yourself before sourcing `zloom.zsh`. Alternatively, you can disable it yourself by disabling `$ZLOOM_AUTOLOAD_COMPINIT`.
 
-To keep subsequent shells fast, `zloom save` byte-compiles the generated `init.zsh`, every sourced plugin script and the `compinit` dump with `zcompile`. Sourcing transparently prefers the newer `.zwc` bytecode and falls back to the plain file whenever it changes (e.g. after `zloom update`), so the caches never need manual maintenance. Stale `.zwc` files are removed together with their originals by `zloom reset`.
+To keep subsequent shells fast, `zloom save` byte-compiles the generated `init.zsh`, every sourced plugin script and the `compinit` dump with `zcompile`. Sourcing transparently prefers the newer `.zwc` bytecode and falls back to the plain file whenever it changes (e.g. after `zloom update`), so the caches never need manual maintenance. Like upstream zgen, `zloom reset` removes only the init script and the completion dump; the `.zwc` files left behind are overwritten by the next regeneration.
 
   [compinit]: <http://zsh.sourceforge.net/Doc/Release/Completion-System.html#Use-of-compinit> "Zsh manual 20.2.1: Use of compinit"
 

@@ -411,20 +411,18 @@ zloom-init() {
 }
 
 zloom-reset() {
+    # Upstream zgen's shape: only the init script and the completion dump
+    # go. The .zwc files zloom compiles stay behind -- nothing reads one
+    # whose original is missing, and the next regeneration overwrites it.
+    # -f because a plain `rm' asks `override r--r--r-- ...?' before removing
+    # a read-only file whenever stdin is a terminal, which read as a hang.
     -zlpute 'Deleting `'"${ZLOOM_INIT}"'` ...'
     if [[ -f "${ZLOOM_INIT}" ]]; then
-        rm "${ZLOOM_INIT}"
-    fi
-    if [[ -f "${ZLOOM_INIT}.zwc" ]]; then
-        rm "${ZLOOM_INIT}.zwc"
+        rm -f "${ZLOOM_INIT}"
     fi
     if [[ -f "${ZLOOM_CUSTOM_COMPDUMP}" ]] || [[ -d "${ZLOOM_CUSTOM_COMPDUMP}" ]]; then
         -zlpute 'Deleting `'"${ZLOOM_CUSTOM_COMPDUMP}"'` ...'
-        rm -r "${ZLOOM_CUSTOM_COMPDUMP}"
-    fi
-    if [[ -f "${ZLOOM_CUSTOM_COMPDUMP}.zwc" ]]; then
-        -zlpute 'Deleting `'"${ZLOOM_CUSTOM_COMPDUMP}.zwc"'` ...'
-        rm "${ZLOOM_CUSTOM_COMPDUMP}.zwc"
+        rm -rf "${ZLOOM_CUSTOM_COMPDUMP}"
     fi
 }
 

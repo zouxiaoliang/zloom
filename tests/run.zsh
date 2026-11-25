@@ -695,6 +695,51 @@ ZLOOM_CUSTOM_COMPDUMP="${T}/home/.zcompdump-user" ZLOOM_COMPINIT_FLAGS=-D zl 'tr
     || no "bootstrap passes ZLOOM_COMPINIT_FLAGS through (-D writes no dump)"
 rm -rf "${T}"
 
+print "31. reset deletes init.zsh and the dump without ever asking"
+sandbox
+mkdir -p "${T}/bin"
+print -r -- 'env X=1' >! "${T}/xdg/zloom/plugins.zsh"
+_dump="${T}/home/.zcompdump-user"
+ZLOOM_CUSTOM_COMPDUMP="${_dump}" zl 'true' >/dev/null 2>&1     # init.zsh + .zwc
+ZLOOM_CUSTOM_COMPDUMP="${_dump}" zl 'true' >/dev/null 2>&1     # dump + .zwc
+chmod a-w "${T}/data/init.zsh.zwc" "${_dump}.zwc"
+# Stand-in for BSD/GNU rm: without -f it asks before removing a file the
+# user cannot write, logs the question and honors the answer. zcompile
+# leaves every .zwc read-only; the real rm only asks when stdin is a
+# terminal, which the suite cannot provide, so that check is dropped here.
+cat >! "${T}/bin/rm" <<'SH'
+#!/bin/sh
+for a in "$@"; do
+    case "$a" in -*f*) exec /bin/rm "$@" ;; -*) ;; *) break ;; esac
+done
+rc=0
+for f in "$@"; do
+    [ -e "$f" ] || continue
+    if [ ! -w "$f" ]; then
+        echo "$f" >> "$ZL_RM_ASKED"
+        read -r ans || ans=n
+        [ "$ans" = y ] || { echo "rm: not removed: $f" >&2; continue; }
+    fi
+    /bin/rm -f -- "$f" || rc=1
+done
+exit $rc
+SH
+chmod +x "${T}/bin/rm"
+: > "${T}/asked"
+print -r -- n n | ZLOOM_CUSTOM_COMPDUMP="${_dump}" \
+    zl "PATH='${T}/bin':\$PATH ZL_RM_ASKED='${T}/asked' zloom reset" >/dev/null 2>&1
+[[ ! -s "${T}/asked" && ! -e "${T}/data/init.zsh" && ! -e "${_dump}" ]] \
+    && ok "reset removes init.zsh and the dump without asking" \
+    || no "reset removes init.zsh and the dump without asking" "no question, both gone" \
+          "$(grep -c . "${T}/asked" 2>/dev/null) question(s)"
+# The compiled files stay behind, as upstream. zsh runs a .zwc instead of
+# its source whenever it is at least as new, so a rebuild must replace it.
+print -r -- 'env X=2' >! "${T}/xdg/zloom/plugins.zsh"
+ZLOOM_CUSTOM_COMPDUMP="${_dump}" zl 'true' >/dev/null 2>&1     # rebuild
+_x="$(ZLOOM_CUSTOM_COMPDUMP="${_dump}" zl 'echo "X=${X:-?}"')"
+check "a .zwc left behind by reset is not reused after a rebuild" "X=2" "${_x}"
+rm -rf "${T}"
+
 print
 print "passed: ${passed}  failed: ${failed}"
 (( failed == 0 )) || exit 1
